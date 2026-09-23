@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS shame_records (
     active INTEGER DEFAULT 1,
     removed_reason TEXT DEFAULT '',
     is_super INTEGER DEFAULT 0,
-    bot_muted INTEGER DEFAULT 0
+    bot_muted INTEGER DEFAULT 0,
+    locked_channel_id INTEGER,
+    loader_removed INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS shame_votes (
@@ -115,6 +117,10 @@ class Database:
         await self._ensure_column("shame_records", "is_super", "INTEGER DEFAULT 0")
         # 1 — микрофон выключил бот и после супер позора его нужно вернуть.
         await self._ensure_column("shame_records", "bot_muted", "INTEGER DEFAULT 0")
+        # Голосовой, из которого нельзя уходить в другие, пока супер позор активен.
+        await self._ensure_column("shame_records", "locked_channel_id", "INTEGER")
+        # 1 — роль «грузчик» снял бот и после снятия супер позора её нужно вернуть.
+        await self._ensure_column("shame_records", "loader_removed", "INTEGER DEFAULT 0")
 
     async def close(self):
         if self.conn:

@@ -26,7 +26,64 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._holders_synced = False
         super().__init__()
+
+    async def _record_current_holders(self, guild: discord.Guild, role: discord.Role, granted_by: int | None) -> int:
+        """Пишет в базу тех, у кого роль уже есть, если такой записи ещё не было."""
+        if not guild.chunked:
+            try:
+                await guild.chunk()
+            except discord.HTTPException:
+                log.exception("Не удалось загрузить список участников %s", guild.id)
+        rows = await self.bot.db.fetchall(
+            "SELECT user_id FROM role_grants WHERE guild_id = ? AND role_id = ?",
+            (guild.id, role.id),
+        )
+        known = {row["user_id"] for row in rows}
+        added = 0
+        for member in role.members:
+            if member.bot or member.id in known:
+                continue
+            await self.bot.db.execute(
+                """INSERT INTO role_grants (role_id, user_id, guild_id, granted_by, granted_at, reason)
+                   VALUES (?, ?, ?, ?, NULL, ?)""",
+                (role.id, member.id, guild.id, granted_by, "уже была на участнике"),
+            )
+            known.add(member.id)
+            added += 1
+        return added
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if self._holders_synced:
+            return
+        self._holders_synced = True
+        granted_by = self.bot.user.id if self.bot.user else None
+        try:
+            await self._sync_holder_records(granted_by)
+        except Exception:
+            self._holders_synced = False
+            log.exception("Не удалось записать текущих носителей ролей")
+
+    async def _sync_holder_records(self, granted_by: int | None):
+        await self.bot.db.execute(
+            "UPDATE role_grants SET granted_at = NULL WHERE reason = ? AND granted_at IS NOT NULL",
+            ("уже была на участнике",),
+        )
+        for guild in self.bot.guilds:
+            rows = await self.bot.db.fetchall(
+                "SELECT role_id FROM managed_roles WHERE guild_id = ?",
+                (guild.id,),
+            )
+            added = 0
+            for row in rows:
+                role = guild.get_role(row["role_id"])
+                if role is None:
+                    continue
+                added += await self._record_current_holders(guild, role, granted_by)
+            if added:
+                log.info("Для сервера %s в базу дописано носителей ролей: %s", guild.id, added)
 
     # ---------- helpers ----------
     async def _get_role_record(self, guild_id: int, role_id: int):
@@ -183,10 +240,12 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
             ),
         )
 
+        recorded = await self._record_current_holders(interaction.guild, role, interaction.user.id)
         embed = discord.Embed(title=f"Роль «{role.name}» зарегистрирована", colour=role.colour)
         embed.add_field(name="Описание", value=description, inline=False)
         embed.add_field(name="За что выдаётся", value=criteria or "—", inline=False)
         embed.add_field(name="Повторная выдача", value="Да" if stackable else "Нет")
+        embed.add_field(name="Уже носили", value=str(recorded))
         embed.set_footer(text="Роль видна в /role list, подробности — в /role info.")
         await interaction.response.send_message(embed=embed)
 
@@ -334,13 +393,15 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
             rows = await self.bot.db.fetchall(
                 """SELECT user_id, MIN(granted_at) as first_grant FROM role_grants
                    WHERE role_id = ? AND guild_id = ?
-                   GROUP BY user_id ORDER BY first_grant ASC LIMIT ?""",
+                   GROUP BY user_id ORDER BY first_grant IS NULL, first_grant ASC LIMIT ?""",
                 (role.id, interaction.guild.id, limit),
             )
-            lines = [
-                f"**{i}.** <@{row['user_id']}> — с {fmt_msk(row['first_grant'])}"
-                for i, row in enumerate(rows, start=1)
-            ]
+            lines = []
+            for i, row in enumerate(rows, start=1):
+                if row["first_grant"]:
+                    lines.append(f"**{i}.** <@{row['user_id']}> — с {fmt_msk(row['first_grant'])}")
+                else:
+                    lines.append(f"**{i}.** <@{row['user_id']}>")
 
         if not lines:
             lines = ["Пока никто не получал эту роль."]

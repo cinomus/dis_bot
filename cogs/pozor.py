@@ -44,14 +44,15 @@ FUNNY_GIVE_MESSAGES = [
 
 # Подписи супер позора. Плейсхолдеры: {mention}, {reason}.
 FUNNY_SUPER_MESSAGES = [
-    "{mention} получает супер позор. 10 минут без микрофона: слушать можно, из канала не выгоняем. В статистике это 100 обычных. Причина: {reason}.",
-    "Супер позор. {mention} 10 минут сидит с закрытым ртом и открытыми ушами. В досье это сотня. Формулировка: {reason}.",
-    "{mention}, микрофон на паузе 10 минут. Канал ваш, голос — нет. Счётчик +100. За что: {reason}.",
-    "Печать супер позора. {mention} молчит в голосе 10 минут и всё слышит. Снять метку может только админ. Основание: {reason}.",
+    "{mention} получает супер позор. 10 минут без микрофона, без грузчика и без чужих голосовых — потом бот сам всё вернёт. В статистике это 100 обычных. Причина: {reason}.",
+    "Супер позор. {mention} на 10 минут без микрофона, без роли грузчика и только в своём канале. Дальше бот вернёт всё сам. В досье это сотня. Формулировка: {reason}.",
+    "{mention}, 10 минут: микрофон на паузе, грузчик снят, чужие голосовые закрыты. Потом бот вернёт. Счётчик +100. За что: {reason}.",
+    "Печать супер позора. {mention} на 10 минут молчит, без грузчика и без смены голосового. Бот сам вернёт микрофон, роль и каналы. Метку снимает админ или голосование. Основание: {reason}.",
 ]
 
 SUPER_MUTE_MINUTES = 10
 SUPER_WEIGHT = 100
+LOADER_ROLE_NAME = "грузчик"
 
 
 def _fmt_hours(hours: float) -> str:
@@ -107,6 +108,14 @@ def _fmt_minutes(minutes: float) -> str:
     return str(max(whole, 1))
 
 
+def _voice_lock_label(row) -> str:
+    """Куда ещё можно зайти, пока висит супер позор."""
+    channel_id = row["locked_channel_id"]
+    if channel_id:
+        return f"голосовой только <#{channel_id}>"
+    return "в голосовые зайти нельзя"
+
+
 def _record_hours(row) -> float:
     """Часы позора: полный текущий срок, а если сняли раньше — время до снятия."""
     try:
@@ -155,6 +164,8 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         self._muted_until: dict[tuple[int, int], datetime] = {}
         # Микрофон вернуть, когда человек окажется в голосовом (сейчас его там нет).
         self._unmute_later: set[tuple[int, int]] = set()
+        # Первые 10 минут супер позора: только этот голосовой. None — в голосе не был, зайти нельзя.
+        self._locked_voice: dict[tuple[int, int], int | None] = {}
         self.check_expired_pozor.start()
         self.check_votes.start()
 
@@ -307,35 +318,109 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             return False
         return True
 
+    def _loader_role(self, guild: discord.Guild) -> discord.Role | None:
+        target = LOADER_ROLE_NAME.casefold()
+        for role in guild.roles:
+            if role.name.casefold() == target:
+                return role
+        return None
+
+    async def _strip_loader(self, member: discord.Member) -> bool:
+        """Снимает роль грузчик, если она есть. False — снять не удалось."""
+        role = self._loader_role(member.guild)
+        if role is None or role not in member.roles:
+            return True
+        try:
+            await member.remove_roles(role, reason="Супер позор")
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Не удалось снять роль грузчик у %s", member.id)
+            return False
+        return True
+
+    async def _restore_loader(self, member: discord.Member) -> bool:
+        """Возвращает роль грузчик. False — роли нет на сервере или Discord не дал её выдать."""
+        role = self._loader_role(member.guild)
+        if role is None:
+            return False
+        if role in member.roles:
+            return True
+        try:
+            await member.add_roles(role, reason="Снятие супер позора")
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Не удалось вернуть роль грузчик %s", member.id)
+            return False
+        return True
+
+    async def _pull_back(self, member: discord.Member, allowed_id: int | None) -> bool:
+        """Возвращает в свой голосовой или выкидывает из чужого. Свой канал не покидает сам."""
+        if not self._in_voice(member):
+            return True
+        if allowed_id is not None and member.voice.channel.id == allowed_id:
+            return True
+        destination = None
+        if allowed_id is not None:
+            channel = member.guild.get_channel(allowed_id)
+            if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                destination = channel
+        try:
+            await member.move_to(destination, reason="Супер позор: только свой голосовой")
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Не удалось удержать %s в своём голосовом", member.id)
+            return False
+        return True
+
     async def _apply_super(self, guild, member: discord.Member, reason: str, given_by: int) -> str | None:
-        """Выдаёт супер позор и выключает микрофон на 10 минут. Канал не трогает."""
+        """Выдаёт супер позор: мут на 10 минут, без грузчика и без чужих голосовых."""
         role = await self._get_pozor_role(guild)
         await member.add_roles(role, reason=f"Супер позор: {reason}")
         now = datetime.now(timezone.utc)
         await self._clear_our_timeout(member, now)
         in_voice = self._in_voice(member)
+        channel_id = member.voice.channel.id if in_voice else None
         already_muted = in_voice and member.voice.mute
         bot_muted = 0 if already_muted else 1
-        note = None
+        loader = self._loader_role(guild)
+        had_loader = loader is not None and loader in member.roles
+        notes: list[str] = []
         if in_voice and not already_muted:
             if not await self._server_mute(member, True, f"Супер позор: {reason}"):
                 bot_muted = 0
-                note = "Метку поставил, но микрофон не выключился: нужно право мутить участников и роль бота выше."
+                notes.append("Метку поставил, но микрофон не выключился: нужно право мутить участников и роль бота выше.")
         await self.bot.db.execute(
             """INSERT INTO shame_records
-               (guild_id, user_id, reason, given_by, given_at, expires_at, active, is_super, bot_muted)
-               VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)""",
-            (guild.id, member.id, reason, given_by, now.isoformat(), bot_muted),
+               (guild_id, user_id, reason, given_by, given_at, expires_at, active, is_super, bot_muted, locked_channel_id, loader_removed)
+               VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?, ?, ?)""",
+            (guild.id, member.id, reason, given_by, now.isoformat(), bot_muted, channel_id, 1 if had_loader else 0),
         )
-        self._muted_until[(guild.id, member.id)] = now + timedelta(minutes=SUPER_MUTE_MINUTES)
-        return note
+        key = (guild.id, member.id)
+        self._muted_until[key] = now + timedelta(minutes=SUPER_MUTE_MINUTES)
+        self._locked_voice[key] = channel_id
+        if loader is None:
+            notes.append("Роли «грузчик» на сервере нет, снять нечего.")
+        elif had_loader and not await self._strip_loader(member):
+            notes.append("Роль «грузчик» снять не вышло: поставьте роль бота выше неё.")
+        if channel_id is None:
+            notes.append("В голосовом его не было: 10 минут зайти в голосовой нельзя, потом бот сам откроет.")
+        elif guild.me is not None and not guild.me.guild_permissions.move_members:
+            notes.append("Удерживать в этом канале не смогу: нужно право перемещать участников.")
+        if self._in_voice(member):
+            current_id = member.voice.channel.id
+            if channel_id is None or current_id != channel_id:
+                await self._pull_back(member, channel_id)
+        return " ".join(notes) if notes else None
 
     async def _release_super(self, guild, member: discord.Member, removed_reason: str):
-        """Снимает супер позор и возвращает микрофон, если его выключали мы."""
+        """Снимает супер позор, возвращает микрофон и роль грузчик, канал больше не держит."""
         row = await self._active_super(guild.id, member.id)
         owed = await self.bot.db.fetchone(
             """SELECT id FROM shame_records
                WHERE guild_id = ? AND user_id = ? AND active = 1 AND is_super = 1 AND bot_muted = 1
+               LIMIT 1""",
+            (guild.id, member.id),
+        )
+        owed_loader = await self.bot.db.fetchone(
+            """SELECT id FROM shame_records
+               WHERE guild_id = ? AND user_id = ? AND active = 1 AND is_super = 1 AND loader_removed = 1
                LIMIT 1""",
             (guild.id, member.id),
         )
@@ -348,11 +433,18 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         )
         key = (guild.id, member.id)
         self._muted_until.pop(key, None)
+        self._locked_voice.pop(key, None)
         if row and row["given_at"]:
             try:
                 await self._clear_our_timeout(member, datetime.fromisoformat(row["given_at"]))
             except ValueError:
                 pass
+        if owed_loader and await self._restore_loader(member):
+            await self.bot.db.execute(
+                """UPDATE shame_records SET loader_removed = 0
+                   WHERE guild_id = ? AND user_id = ? AND is_super = 1 AND loader_removed = 1""",
+                (guild.id, member.id),
+            )
         if owed:
             if await self._server_mute(member, False, f"Снятие супер позора: {removed_reason}"):
                 await self._clear_bot_muted(guild.id, member.id)
@@ -372,8 +464,28 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             (guild_id, user_id),
         )
 
+    async def _return_loader_if_owed(self, guild_id: int, user_id: int):
+        """Возвращает роль грузчик, если её забирали на эти 10 минут."""
+        owed = await self.bot.db.fetchone(
+            """SELECT id FROM shame_records
+               WHERE guild_id = ? AND user_id = ? AND is_super = 1 AND loader_removed = 1
+               LIMIT 1""",
+            (guild_id, user_id),
+        )
+        if not owed:
+            return
+        guild = self.bot.get_guild(guild_id)
+        member = await self._get_member(guild, user_id) if guild else None
+        if member is None or not await self._restore_loader(member):
+            return
+        await self.bot.db.execute(
+            """UPDATE shame_records SET loader_removed = 0
+               WHERE guild_id = ? AND user_id = ? AND is_super = 1 AND loader_removed = 1""",
+            (guild_id, user_id),
+        )
+
     async def _lift_expired_voice_mutes(self):
-        """Через 10 минут снова даёт говорить. Метку супер позора это не снимает."""
+        """Через 10 минут возвращает микрофон, роль грузчик и переход между каналами. Метку не снимает."""
         rows = await self.bot.db.fetchall(
             "SELECT * FROM shame_records WHERE is_super = 1 AND (active = 1 OR bot_muted = 1)"
         )
@@ -405,6 +517,8 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                     await self._server_mute(member, True, "Супер позор")
                 continue
             self._muted_until.pop(key, None)
+            self._locked_voice.pop(key, None)
+            await self._return_loader_if_owed(guild_id, user_id)
             if key not in owed:
                 continue
             guild = self.bot.get_guild(guild_id)
@@ -417,6 +531,44 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                 continue
             if await self._server_mute(member, False, "Супер позор: 10 минут без микрофона прошли"):
                 await self._clear_bot_muted(guild_id, user_id)
+
+    async def _sync_super_holds(self):
+        """Пока не вышли 10 минут, держит без грузчика и только в своём голосовом. Потом роль возвращает."""
+        rows = await self.bot.db.fetchall(
+            "SELECT * FROM shame_records WHERE is_super = 1 AND active = 1"
+        )
+        now = datetime.now(timezone.utc)
+        latest: dict[tuple[int, int], object] = {}
+        for row in rows:
+            key = (row["guild_id"], row["user_id"])
+            current = latest.get(key)
+            if current is None or (row["given_at"] or "") > (current["given_at"] or ""):
+                latest[key] = row
+        locked: dict[tuple[int, int], int | None] = {}
+        for key, row in latest.items():
+            try:
+                end = datetime.fromisoformat(row["given_at"]) + timedelta(minutes=SUPER_MUTE_MINUTES)
+            except (TypeError, ValueError):
+                continue
+            if end > now:
+                locked[key] = row["locked_channel_id"]
+        self._locked_voice = locked
+        for key, channel_id in locked.items():
+            guild = self.bot.get_guild(key[0])
+            member = await self._get_member(guild, key[1]) if guild else None
+            if member is None:
+                continue
+            await self._strip_loader(member)
+            await self._pull_back(member, channel_id)
+        owed = await self.bot.db.fetchall(
+            """SELECT DISTINCT guild_id, user_id FROM shame_records
+               WHERE is_super = 1 AND loader_removed = 1"""
+        )
+        for row in owed:
+            key = (row["guild_id"], row["user_id"])
+            if key in self._locked_voice:
+                continue
+            await self._return_loader_if_owed(row["guild_id"], row["user_id"])
 
     def _give_text(self, member: discord.Member, reason: str, duration_hours: float, extended: bool, expires_at: datetime) -> str:
         hours = _fmt_hours(duration_hours)
@@ -569,24 +721,17 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                             member, row["reason"], row["duration_hours"], extended, expires_at
                         )
                     else:
-                        if await self._active_super(guild.id, member.id):
-                            regular = await self._active_pozor(guild.id, member.id)
-                            if regular:
-                                await self._release_pozor(
-                                    guild, member, f"снято голосованием: {row['reason']}", announce=False
-                                )
-                                text = (
-                                    "✅ Обычный позор снят голосованием. "
-                                    "Супер позор остаётся: его снимает только админ."
-                                )
-                            else:
-                                applied = False
-                                text = "❌ Это супер позор. Снять его может только админ."
-                        else:
-                            await self._release_pozor(
-                                guild, member, f"снято голосованием: {row['reason']}", announce=False
-                            )
-                            text = f"✅ Голосование прошло! {random.choice(FUNNY_RELEASE_MESSAGES).format(mention=member.mention)}"
+                        removed_reason = f"снято голосованием: {row['reason']}"
+                        had_super = await self._active_super(guild.id, member.id)
+                        if had_super:
+                            await self._release_super(guild, member, removed_reason)
+                        await self._release_pozor(guild, member, removed_reason, announce=False)
+                        text = (
+                            "✅ Голосование прошло! "
+                            + random.choice(FUNNY_RELEASE_MESSAGES).format(mention=member.mention)
+                        )
+                        if had_super:
+                            text = "Супер позор снят голосованием. " + text
                 except Exception:
                     log.exception("Не удалось применить результат голосования %s", vote_id)
                     await self.bot.db.execute(
@@ -623,10 +768,12 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         await interaction.response.send_message(self._give_text(member, reason, duration_hours, extended, expires_at))
 
     # ---------- /pozor super ----------
-    @app_commands.command(name="super", description="Выдать супер позор: 10 минут без микрофона и ×100 в статистике")
+    @app_commands.command(
+        name="super",
+        description="Супер позор: 10 минут без микрофона, без грузчика, только свой канал, ×100",
+    )
     @app_commands.rename(member="участник", reason="причина")
     @app_commands.describe(member="Кого опозорить по-крупному", reason="Причина")
-    @app_commands.checks.has_permissions(manage_roles=True)
     async def super_pozor(self, interaction: discord.Interaction, member: discord.Member, reason: str):
         if member.bot:
             await interaction.response.send_message("Ботам супер позор не выдаём.", ephemeral=True)
@@ -647,17 +794,28 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
     @app_commands.command(name="remove", description="Снять позор с участника напрямую")
     @app_commands.rename(member="участник", reason="причина")
     @app_commands.describe(member="С кого снять позор", reason="Почему снимаете")
-    @app_commands.checks.has_permissions(manage_roles=True)
     async def remove(self, interaction: discord.Interaction, member: discord.Member, reason: str = "решение модератора"):
+        is_admin = await self._is_admin(interaction.user, interaction.guild)
+        can_moderate = is_admin or interaction.user.guild_permissions.manage_roles
         super_row = await self._active_super(interaction.guild.id, member.id)
-        if super_row and not await self._is_admin(interaction.user, interaction.guild):
+        if super_row and not is_admin:
             regular = await self._active_pozor(interaction.guild.id, member.id)
-            if not regular:
-                await interaction.response.send_message("Супер позор снимает только админ.", ephemeral=True)
+            if not regular or not can_moderate:
+                await interaction.response.send_message(
+                    "Супер позор командой снимает только админ. Ещё его можно снять голосованием /pozor vote_remove.",
+                    ephemeral=True,
+                )
                 return
             await self._release_pozor(interaction.guild, member, reason, announce=False)
             text = random.choice(FUNNY_RELEASE_MESSAGES).format(mention=member.mention)
-            await interaction.response.send_message(f"{text}\nСупер позор остаётся: его снимает только админ.")
+            await interaction.response.send_message(
+                f"{text}\nСупер позор остаётся: его снимает админ или голосование /pozor vote_remove."
+            )
+            return
+        if not can_moderate:
+            await interaction.response.send_message(
+                "Обычный позор снимает тот, у кого есть право управлять ролями.", ephemeral=True
+            )
             return
         if super_row:
             await self._release_super(interaction.guild, member, reason)
@@ -688,11 +846,15 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             mute = _mute_left_minutes(super_row)
             reason = super_row["reason"] or "—"
             if mute is not None:
-                silence = f"без микрофона ещё {_fmt_minutes(mute)} мин, слушать можно"
+                silence = (
+                    f"ещё {_fmt_minutes(mute)} мин без микрофона, без грузчика, {_voice_lock_label(super_row)}"
+                )
             else:
-                silence = "микрофон уже можно включать"
+                silence = "микрофон, роль грузчик и переход между каналами уже возвращены"
             weight = SUPER_WEIGHT * len(super_rows)
-            lines.append(f"Супер позор (×{weight}): {silence}. Снять может только админ. Причина: {reason}")
+            lines.append(
+                f"Супер позор (×{weight}): {silence}. Метку снимает админ или голосование. Причина: {reason}"
+            )
         if regular:
             expires = datetime.fromisoformat(regular["expires_at"])
             hours_left = max((expires - datetime.now(timezone.utc)).total_seconds() / 3600, 0)
@@ -715,7 +877,10 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                 reason = reason[:77] + "..."
             if _is_super(row):
                 mute = _mute_left_minutes(row)
-                silence = f", без микрофона ещё {_fmt_minutes(mute)} мин" if mute is not None else ""
+                if mute is not None:
+                    silence = f", ещё {_fmt_minutes(mute)} мин без микрофона, без грузчика, {_voice_lock_label(row)}"
+                else:
+                    silence = ", ограничения уже сняты"
                 lines.append(f"<@{row['user_id']}> — супер позор (×{SUPER_WEIGHT}){silence} ({reason})")
                 continue
             try:
@@ -750,9 +915,12 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             if row["active"] and _is_super(row):
                 mute = _mute_left_minutes(row)
                 if mute is not None:
-                    state = f"сейчас, без микрофона ещё {_fmt_minutes(mute)} мин. Снять может только админ."
+                    state = (
+                        f"сейчас, ещё {_fmt_minutes(mute)} мин без микрофона, без грузчика, {_voice_lock_label(row)}. "
+                        "Потом бот вернёт сам. Метку снимает админ или голосование."
+                    )
                 else:
-                    state = "сейчас. Микрофон уже можно включать, снять метку может только админ."
+                    state = "сейчас. Микрофон, роль грузчик и каналы уже возвращены. Метку снимает админ или голосование."
             elif row["active"]:
                 try:
                     left = max(
@@ -853,12 +1021,9 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             return
 
         settings = await self._get_settings(interaction.guild.id)
-        if vote_type == "remove" and await self._active_super(interaction.guild.id, member.id):
-            await interaction.response.send_message(
-                f"У {member.mention} супер позор. Снять его может только админ, голосование тут не поможет.",
-                ephemeral=True,
-            )
-            return
+        super_row = (
+            await self._active_super(interaction.guild.id, member.id) if vote_type == "remove" else None
+        )
         active = await self._active_pozor(interaction.guild.id, member.id) if vote_type == "give" else None
         if vote_type == "give" and not active:
             left = await self._cooldown_left(interaction.guild.id, member.id, settings)
@@ -878,6 +1043,13 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         extend_note = ""
         if vote_type == "give" and active:
             extend_note = "\nУ участника уже есть позор: если голосование пройдёт, срок продлится, а не начнётся заново."
+        elif super_row:
+            action_text = "снять супер позор"
+            also_regular = await self._active_pozor(interaction.guild.id, member.id)
+            if also_regular:
+                extend_note = "\nЕсли голосование пройдёт, снимутся и супер позор, и обычный."
+            else:
+                extend_note = "\nУ участника супер позор: если голосование пройдёт, метка снимется."
         embed = discord.Embed(
             title=f"Голосование: {action_text}",
             description=(
@@ -1001,10 +1173,17 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        """Пока идёт супер позор, человек остаётся в канале, слышит, но не говорит."""
-        if member.bot or after.channel is None:
+        """Супер позор: чужой голосовой закрыт. 10 минут ещё и без микрофона, канал при этом не бросаем."""
+        if member.bot:
             return
         key = (member.guild.id, member.id)
+        if key in self._locked_voice and after.channel is not None:
+            allowed = self._locked_voice[key]
+            if allowed is None or after.channel.id != allowed:
+                if await self._pull_back(member, allowed):
+                    return
+        if after.channel is None:
+            return
         until = self._muted_until.get(key)
         if until is not None and datetime.now(timezone.utc) < until:
             if not after.mute:
@@ -1014,6 +1193,16 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             return
         if await self._server_mute(member, False, "Супер позор: микрофон можно снова включать"):
             await self._clear_bot_muted(member.guild.id, member.id)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """Первые 10 минут супер позора роль грузчик обратно не приживается."""
+        if after.bot or (after.guild.id, after.id) not in self._locked_voice:
+            return
+        role = self._loader_role(after.guild)
+        if role is None or role not in after.roles or role in before.roles:
+            return
+        await self._strip_loader(after)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -1065,6 +1254,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                     ("срок истёк, участник не на сервере", datetime.now(timezone.utc).isoformat(), row["id"]),
                 )
         await self._lift_expired_voice_mutes()
+        await self._sync_super_holds()
 
     @tasks.loop(minutes=1)
     async def check_votes(self):
@@ -1077,6 +1267,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
     async def before_check_expired_pozor(self):
         await self.bot.wait_until_ready()
         await self._lift_expired_voice_mutes()
+        await self._sync_super_holds()
 
     @check_votes.before_loop
     async def before_check_votes(self):
