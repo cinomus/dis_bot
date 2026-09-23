@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS shame_records (
     given_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT,
     active INTEGER DEFAULT 1,
-    removed_reason TEXT DEFAULT ''
+    removed_reason TEXT DEFAULT '',
+    is_super INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS shame_votes (
@@ -107,6 +108,8 @@ class Database:
         # Когда позор сняли — нужно для истории, топа и кулдауна нового голосования.
         await self._ensure_column("shame_records", "removed_at", "TEXT")
         await self._ensure_column("guild_settings", "pozor_cooldown_hours", "REAL")
+        # Супер позор не истекает сам и в статистике весит как 100 обычных.
+        await self._ensure_column("shame_records", "is_super", "INTEGER DEFAULT 0")
 
     async def close(self):
         if self.conn:

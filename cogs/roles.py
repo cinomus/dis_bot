@@ -60,6 +60,13 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role create ----------
     @app_commands.command(name="create", description="Создать новую роль и занести её в базу")
+    @app_commands.rename(
+        name="название",
+        description="описание",
+        criteria="критерии",
+        color="цвет",
+        stackable="повторно",
+    )
     @app_commands.describe(
         name="Название роли",
         description="Описание роли",
@@ -126,6 +133,7 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
         name="register",
         description="Зарегистрировать уже существующую роль и задать ей описание",
     )
+    @app_commands.rename(role="роль", description="описание", criteria="критерии", stackable="повторно")
     @app_commands.describe(
         role="Роль, которая уже есть на сервере",
         description="Описание роли",
@@ -221,6 +229,8 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role info ----------
     @app_commands.command(name="info", description="Подробная информация о роли")
+    @app_commands.rename(role="роль")
+    @app_commands.describe(role="Роль из базы")
     async def info(self, interaction: discord.Interaction, role: discord.Role):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
@@ -255,6 +265,8 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role give ----------
     @app_commands.command(name="give", description="Выдать роль участнику")
+    @app_commands.rename(member="участник", role="роль", reason="причина")
+    @app_commands.describe(member="Кому выдать", role="Какую роль", reason="За что")
     @app_commands.checks.has_permissions(manage_roles=True)
     async def give(
         self,
@@ -293,6 +305,8 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role top ----------
     @app_commands.command(name="top", description="Топ участников по роли")
+    @app_commands.rename(role="роль", limit="лимит")
+    @app_commands.describe(role="По какой роли топ", limit="Сколько строк показать")
     async def top(self, interaction: discord.Interaction, role: discord.Role, limit: int = 10):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
@@ -335,7 +349,9 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role edit ----------
     @app_commands.command(name="edit", description="Изменить название/описание/критерии/цвет роли")
+    @app_commands.rename(role="роль", name="название", description="описание", criteria="критерии", color="цвет")
     @app_commands.describe(
+        role="Какую роль изменить",
         name="Новое название роли (необязательно)",
         description="Новое описание (необязательно)",
         criteria="Новое «за что выдаётся» (необязательно)",
@@ -405,7 +421,11 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role delete ----------
     @app_commands.command(name="delete", description="Удалить роль из базы (и опционально из Discord)")
-    @app_commands.describe(delete_from_discord="Удалить роль полностью с сервера, а не только из базы бота")
+    @app_commands.rename(role="роль", delete_from_discord="с_сервера")
+    @app_commands.describe(
+        role="Какую роль убрать из базы",
+        delete_from_discord="Удалить роль полностью с сервера, а не только из базы бота",
+    )
     async def delete(self, interaction: discord.Interaction, role: discord.Role, delete_from_discord: bool = False):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
@@ -434,6 +454,7 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
 
     # ---------- /role setup ----------
     @app_commands.command(name="setup", description="Настроить права на редактирование ролей")
+    @app_commands.rename(admin_role="админ", trusted_role="доверенная", edit_window_hours="окно")
     @app_commands.describe(
         admin_role="Роль, которая всегда может редактировать/удалять любые роли из базы",
         trusted_role='Роль (например "бро <3"), которая может редактировать/удалять роль, пока не истекло окно',

@@ -53,6 +53,7 @@ class AIChatCog(commands.Cog):
             return "".join(block.get("text", "") for block in data.get("content", []))
 
     @app_commands.command(name="ask", description="Задать вопрос AI-модели")
+    @app_commands.rename(provider="модель", prompt="вопрос")
     @app_commands.describe(provider="Какую модель спросить", prompt="Текст вопроса")
     @app_commands.choices(provider=PROVIDER_CHOICES)
     async def ask(self, interaction: discord.Interaction, provider: app_commands.Choice[str], prompt: str):
