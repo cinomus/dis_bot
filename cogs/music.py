@@ -140,7 +140,7 @@ def _track_line(track: Track) -> str:
     return f"**{title}**{suffix} — <@{track.requester_id}>"
 
 
-class MusicCog(commands.GroupCog, name="музыка", description="Музыка в голосовом канале"):
+class MusicCog(commands.GroupCog, name="music", description="Музыка в голосовом канале"):
     """Поиск и очередь треков. Источник — ссылка или название, поток качает yt-dlp, играет FFmpeg."""
 
     def __init__(self, bot: commands.Bot):
@@ -186,7 +186,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
             if vc.channel and vc.channel.id != channel.id:
                 if vc.is_playing() or vc.is_paused():
                     raise RuntimeError(
-                        f"Бот уже играет в {vc.channel.name}. Зайдите туда или остановите музыку командой /музыка стоп."
+                        f"Бот уже играет в {vc.channel.name}. Зайдите туда или остановите музыку командой /music stop."
                     )
                 await vc.move_to(channel)
             await self._unsuppress_stage(me, channel)
@@ -288,14 +288,14 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
             return
         await self._disconnect(member.guild.id)
 
-    @app_commands.command(name="играть", description="Включить трек по ссылке или названию")
-    @app_commands.describe(запрос="Название песни или ссылка")
-    async def play(self, interaction: discord.Interaction, запрос: str):
+    @app_commands.command(name="play", description="Включить трек по ссылке или названию")
+    @app_commands.describe(query="Название песни или ссылка")
+    async def play(self, interaction: discord.Interaction, query: str):
         member = self._member(interaction)
         if member is None:
             await self._deny(interaction, "Музыка работает только на сервере.")
             return
-        query = запрос.strip()
+        query = query.strip()
         if not query:
             await self._deny(interaction, "Напишите название или ссылку.")
             return
@@ -353,11 +353,11 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
         else:
             await interaction.followup.send(f"Сейчас играет: {line}")
 
-    @app_commands.command(name="пауза", description="Поставить музыку на паузу")
+    @app_commands.command(name="pause", description="Поставить музыку на паузу")
     async def pause(self, interaction: discord.Interaction):
         await self._toggle(interaction, pause=True)
 
-    @app_commands.command(name="продолжить", description="Продолжить воспроизведение")
+    @app_commands.command(name="resume", description="Продолжить воспроизведение")
     async def resume(self, interaction: discord.Interaction):
         await self._toggle(interaction, pause=False)
 
@@ -384,7 +384,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
         vc.resume()
         await interaction.response.send_message("Продолжаю.")
 
-    @app_commands.command(name="пропустить", description="Пропустить текущий трек")
+    @app_commands.command(name="skip", description="Пропустить текущий трек")
     async def skip(self, interaction: discord.Interaction):
         member = self._member(interaction)
         if member is None:
@@ -403,7 +403,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
         title = _safe_title(current.title) if current else "трек"
         await interaction.response.send_message(f"Пропускаю **{title}**.")
 
-    @app_commands.command(name="стоп", description="Остановить музыку и очистить очередь")
+    @app_commands.command(name="stop", description="Остановить музыку и очистить очередь")
     async def stop(self, interaction: discord.Interaction):
         member = self._member(interaction)
         if member is None:
@@ -422,7 +422,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
             vc.stop()
         await interaction.response.send_message("Остановил и очистил очередь. Бот остаётся в канале.")
 
-    @app_commands.command(name="выйти", description="Отключить бота от голосового канала")
+    @app_commands.command(name="leave", description="Отключить бота от голосового канала")
     async def leave(self, interaction: discord.Interaction):
         member = self._member(interaction)
         if member is None:
@@ -438,7 +438,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
         await self._disconnect(member.guild.id)
         await interaction.response.send_message("Вышел из голосового канала.")
 
-    @app_commands.command(name="очередь", description="Показать, что сейчас играет и что дальше")
+    @app_commands.command(name="queue", description="Показать, что сейчас играет и что дальше")
     async def queue(self, interaction: discord.Interaction):
         member = self._member(interaction)
         if member is None:
@@ -446,7 +446,7 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
             return
         player = self.players.get(member.guild.id)
         if player is None or (player.current is None and not player.queue):
-            await interaction.response.send_message("Очередь пустая. Включите трек командой /музыка играть.")
+            await interaction.response.send_message("Очередь пустая. Включите трек командой /music play.")
             return
         lines = []
         if player.current:
@@ -459,19 +459,19 @@ class MusicCog(commands.GroupCog, name="музыка", description="Музыка
                 lines.append(f"…и ещё {len(player.queue) - len(shown)}")
         await interaction.response.send_message("\n".join(lines))
 
-    @app_commands.command(name="громкость", description="Изменить громкость")
-    @app_commands.describe(уровень="От 1 до 100")
-    async def volume(self, interaction: discord.Interaction, уровень: app_commands.Range[int, 1, 100]):
+    @app_commands.command(name="volume", description="Изменить громкость")
+    @app_commands.describe(level="От 1 до 100")
+    async def volume(self, interaction: discord.Interaction, level: app_commands.Range[int, 1, 100]):
         member = self._member(interaction)
         if member is None:
             await self._deny(interaction, "Музыка работает только на сервере.")
             return
         player = self._player(member.guild.id)
-        player.volume = уровень / 100
+        player.volume = level / 100
         vc = member.guild.voice_client
         if isinstance(vc, discord.VoiceClient) and isinstance(vc.source, discord.PCMVolumeTransformer):
             vc.source.volume = player.volume
-        await interaction.response.send_message(f"Громкость: {уровень}%.")
+        await interaction.response.send_message(f"Громкость: {level}%.")
 
 
 async def setup(bot: commands.Bot):
