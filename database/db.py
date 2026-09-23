@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import aiosqlite
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS shame_records (
     expires_at TEXT,
     active INTEGER DEFAULT 1,
     removed_reason TEXT DEFAULT '',
-    is_super INTEGER DEFAULT 0
+    is_super INTEGER DEFAULT 0,
+    bot_muted INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS shame_votes (
@@ -71,6 +73,7 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         self.conn: aiosqlite.Connection | None = None
+        self.lock = asyncio.Lock()
 
     async def connect(self):
         directory = os.path.dirname(self.path)
@@ -110,24 +113,29 @@ class Database:
         await self._ensure_column("guild_settings", "pozor_cooldown_hours", "REAL")
         # Супер позор не истекает сам и в статистике весит как 100 обычных.
         await self._ensure_column("shame_records", "is_super", "INTEGER DEFAULT 0")
+        # 1 — микрофон выключил бот и после супер позора его нужно вернуть.
+        await self._ensure_column("shame_records", "bot_muted", "INTEGER DEFAULT 0")
 
     async def close(self):
         if self.conn:
             await self.conn.close()
 
     async def execute(self, query: str, params: tuple = ()):
-        cur = await self.conn.execute(query, params)
-        await self.conn.commit()
-        return cur
+        async with self.lock:
+            cur = await self.conn.execute(query, params)
+            await self.conn.commit()
+            return cur
 
     async def fetchone(self, query: str, params: tuple = ()):
-        cur = await self.conn.execute(query, params)
-        row = await cur.fetchone()
-        await cur.close()
-        return row
+        async with self.lock:
+            cur = await self.conn.execute(query, params)
+            row = await cur.fetchone()
+            await cur.close()
+            return row
 
     async def fetchall(self, query: str, params: tuple = ()):
-        cur = await self.conn.execute(query, params)
-        rows = await cur.fetchall()
-        await cur.close()
-        return rows
+        async with self.lock:
+            cur = await self.conn.execute(query, params)
+            rows = await cur.fetchall()
+            await cur.close()
+            return rows

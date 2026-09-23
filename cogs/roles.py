@@ -7,6 +7,7 @@ from discord.ext import commands
 
 import config
 from utils.settings import get_settings, resolve_role
+from utils.time import fmt_msk
 
 log = logging.getLogger("cogs.roles")
 
@@ -337,7 +338,7 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
                 (role.id, interaction.guild.id, limit),
             )
             lines = [
-                f"**{i}.** <@{row['user_id']}> — с {row['first_grant'][:10]}"
+                f"**{i}.** <@{row['user_id']}> — с {fmt_msk(row['first_grant'])}"
                 for i, row in enumerate(rows, start=1)
             ]
 

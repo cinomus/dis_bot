@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 
 import config
 from utils.settings import get_settings, resolve_role
+from utils.time import fmt_msk
 
 log = logging.getLogger("cogs.pozor")
 
@@ -43,10 +44,10 @@ FUNNY_GIVE_MESSAGES = [
 
 # Подписи супер позора. Плейсхолдеры: {mention}, {reason}.
 FUNNY_SUPER_MESSAGES = [
-    "{mention} получает супер позор. 10 минут тишины в чате, а в статистике это сразу 100 обычных. Причина: {reason}.",
-    "Супер позор. {mention} на 10 минут лишается права говорить. В досье это сотня. Формулировка: {reason}.",
-    "{mention}, это уже не угол, это изолятор на 10 минут. Счётчик крутанулся на 100. За что: {reason}.",
-    "Печать супер позора. {mention} молчит 10 минут, снять метку может только админ. Основание: {reason}.",
+    "{mention} получает супер позор. 10 минут без микрофона: слушать можно, из канала не выгоняем. В статистике это 100 обычных. Причина: {reason}.",
+    "Супер позор. {mention} 10 минут сидит с закрытым ртом и открытыми ушами. В досье это сотня. Формулировка: {reason}.",
+    "{mention}, микрофон на паузе 10 минут. Канал ваш, голос — нет. Счётчик +100. За что: {reason}.",
+    "Печать супер позора. {mention} молчит в голосе 10 минут и всё слышит. Снять метку может только админ. Основание: {reason}.",
 ]
 
 SUPER_MUTE_MINUTES = 10
@@ -60,12 +61,7 @@ def _fmt_hours(hours: float) -> str:
 
 
 def _fmt_dt(value: str | None) -> str:
-    if not value:
-        return "—"
-    try:
-        return datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M UTC")
-    except ValueError:
-        return value
+    return fmt_msk(value)
 
 
 def _times_label(count: int) -> str:
@@ -155,6 +151,10 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         self.bot = bot
         super().__init__()
         self._resolving_votes: set[int] = set()
+        # До какого момента человеку нельзя говорить. Канал при этом не покидаем.
+        self._muted_until: dict[tuple[int, int], datetime] = {}
+        # Микрофон вернуть, когда человек окажется в голосовом (сейчас его там нет).
+        self._unmute_later: set[tuple[int, int]] = set()
         self.check_expired_pozor.start()
         self.check_votes.start()
 
@@ -279,33 +279,66 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         )
         return False, expires_at
 
+    def _in_voice(self, member: discord.Member) -> bool:
+        voice = member.voice
+        return voice is not None and voice.channel is not None
+
+    async def _clear_our_timeout(self, member: discord.Member, issued: datetime):
+        """Старый супер позор ставил таймаут, а он выкидывает из голосового. Снимаем только короткий."""
+        if not member.is_timed_out() or member.timed_out_until is None:
+            return
+        if member.timed_out_until > issued + timedelta(minutes=SUPER_MUTE_MINUTES, seconds=30):
+            return
+        try:
+            await member.timeout(None, reason="Супер позор: вместо таймаута серверный мут")
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Не удалось снять старый таймаут супер позора %s", member.id)
+
+    async def _server_mute(self, member: discord.Member, muted: bool, reason: str) -> bool:
+        """Серверный мут: нельзя говорить, слышно всё, из канала не выкидывает."""
+        if not self._in_voice(member):
+            return False
+        if bool(member.voice.mute) == muted:
+            return True
+        try:
+            await member.edit(mute=muted, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Не удалось %s микрофон %s", "выключить" if muted else "включить", member.id)
+            return False
+        return True
+
     async def _apply_super(self, guild, member: discord.Member, reason: str, given_by: int) -> str | None:
-        """Выдаёт супер позор и закрывает чат на 10 минут. Возвращает оговорку, если таймаут не встал."""
+        """Выдаёт супер позор и выключает микрофон на 10 минут. Канал не трогает."""
         role = await self._get_pozor_role(guild)
         await member.add_roles(role, reason=f"Супер позор: {reason}")
         now = datetime.now(timezone.utc)
+        await self._clear_our_timeout(member, now)
+        in_voice = self._in_voice(member)
+        already_muted = in_voice and member.voice.mute
+        bot_muted = 0 if already_muted else 1
+        note = None
+        if in_voice and not already_muted:
+            if not await self._server_mute(member, True, f"Супер позор: {reason}"):
+                bot_muted = 0
+                note = "Метку поставил, но микрофон не выключился: нужно право мутить участников и роль бота выше."
         await self.bot.db.execute(
-            """INSERT INTO shame_records (guild_id, user_id, reason, given_by, given_at, expires_at, active, is_super)
-               VALUES (?, ?, ?, ?, ?, NULL, 1, 1)""",
-            (guild.id, member.id, reason, given_by, now.isoformat()),
+            """INSERT INTO shame_records
+               (guild_id, user_id, reason, given_by, given_at, expires_at, active, is_super, bot_muted)
+               VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)""",
+            (guild.id, member.id, reason, given_by, now.isoformat(), bot_muted),
         )
-
-        mute_until = now + timedelta(minutes=SUPER_MUTE_MINUTES)
-        current = member.timed_out_until
-        if current is not None and current > mute_until:
-            return "Чат уже закрыт дольше, чем на 10 минут, поэтому срок молчания не укорачивал."
-        try:
-            await member.timeout(timedelta(minutes=SUPER_MUTE_MINUTES), reason=f"Супер позор: {reason}")
-        except discord.Forbidden:
-            return "Метку поставил, но закрыть чат не вышло: у бота нет права модерировать этого участника."
-        except discord.HTTPException:
-            log.exception("Не удалось выдать таймаут супер позора %s", member.id)
-            return "Метку поставил, но Discord не принял таймаут."
-        return None
+        self._muted_until[(guild.id, member.id)] = now + timedelta(minutes=SUPER_MUTE_MINUTES)
+        return note
 
     async def _release_super(self, guild, member: discord.Member, removed_reason: str):
-        """Снимает все активные супер позоры и молчание, если его ставили мы."""
+        """Снимает супер позор и возвращает микрофон, если его выключали мы."""
         row = await self._active_super(guild.id, member.id)
+        owed = await self.bot.db.fetchone(
+            """SELECT id FROM shame_records
+               WHERE guild_id = ? AND user_id = ? AND active = 1 AND is_super = 1 AND bot_muted = 1
+               LIMIT 1""",
+            (guild.id, member.id),
+        )
         now = datetime.now(timezone.utc)
         await self.bot.db.execute(
             """UPDATE shame_records
@@ -313,22 +346,77 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                WHERE guild_id = ? AND user_id = ? AND active = 1 AND is_super = 1""",
             (removed_reason, now.isoformat(), guild.id, member.id),
         )
-        if row and member.is_timed_out() and member.timed_out_until is not None:
+        key = (guild.id, member.id)
+        self._muted_until.pop(key, None)
+        if row and row["given_at"]:
             try:
-                issued = datetime.fromisoformat(row["given_at"])
-            except (TypeError, ValueError):
-                issued = now
-            # Чужой более длинный таймаут не трогаем: наш не длиннее 10 минут от выдачи.
-            if member.timed_out_until <= issued + timedelta(minutes=SUPER_MUTE_MINUTES, seconds=30):
-                try:
-                    await member.timeout(None, reason=f"Снятие супер позора: {removed_reason}")
-                except (discord.Forbidden, discord.HTTPException):
-                    log.exception("Не удалось снять таймаут супер позора %s", member.id)
+                await self._clear_our_timeout(member, datetime.fromisoformat(row["given_at"]))
+            except ValueError:
+                pass
+        if owed:
+            if await self._server_mute(member, False, f"Снятие супер позора: {removed_reason}"):
+                await self._clear_bot_muted(guild.id, member.id)
+            elif not self._in_voice(member):
+                self._unmute_later.add(key)
         settings = await self._get_settings(guild.id)
         still_active = await self._any_active(guild.id, member.id)
         role = guild.get_role(settings["shame_role_id"]) if settings["shame_role_id"] else None
         if role and role in member.roles and not still_active:
             await member.remove_roles(role, reason=f"Снятие супер позора: {removed_reason}")
+
+    async def _clear_bot_muted(self, guild_id: int, user_id: int):
+        self._unmute_later.discard((guild_id, user_id))
+        await self.bot.db.execute(
+            """UPDATE shame_records SET bot_muted = 0
+               WHERE guild_id = ? AND user_id = ? AND is_super = 1 AND bot_muted = 1""",
+            (guild_id, user_id),
+        )
+
+    async def _lift_expired_voice_mutes(self):
+        """Через 10 минут снова даёт говорить. Метку супер позора это не снимает."""
+        rows = await self.bot.db.fetchall(
+            "SELECT * FROM shame_records WHERE is_super = 1 AND (active = 1 OR bot_muted = 1)"
+        )
+        latest_active: dict[tuple[int, int], object] = {}
+        owed: set[tuple[int, int]] = set()
+        for row in rows:
+            key = (row["guild_id"], row["user_id"])
+            if row["bot_muted"]:
+                owed.add(key)
+            if row["active"]:
+                current = latest_active.get(key)
+                if current is None or row["given_at"] > current["given_at"]:
+                    latest_active[key] = row
+        now = datetime.now(timezone.utc)
+        for key in owed | set(latest_active):
+            guild_id, user_id = key
+            row = latest_active.get(key)
+            mute_end = None
+            if row is not None:
+                try:
+                    mute_end = datetime.fromisoformat(row["given_at"]) + timedelta(minutes=SUPER_MUTE_MINUTES)
+                except (TypeError, ValueError):
+                    mute_end = now
+            if mute_end is not None and mute_end > now:
+                self._muted_until[key] = mute_end
+                guild = self.bot.get_guild(guild_id)
+                member = await self._get_member(guild, user_id) if guild else None
+                if member and self._in_voice(member) and not member.voice.mute:
+                    await self._server_mute(member, True, "Супер позор")
+                continue
+            self._muted_until.pop(key, None)
+            if key not in owed:
+                continue
+            guild = self.bot.get_guild(guild_id)
+            member = await self._get_member(guild, user_id) if guild else None
+            if member is None:
+                await self._clear_bot_muted(guild_id, user_id)
+                continue
+            if not self._in_voice(member):
+                self._unmute_later.add(key)
+                continue
+            if await self._server_mute(member, False, "Супер позор: 10 минут без микрофона прошли"):
+                await self._clear_bot_muted(guild_id, user_id)
 
     def _give_text(self, member: discord.Member, reason: str, duration_hours: float, extended: bool, expires_at: datetime) -> str:
         hours = _fmt_hours(duration_hours)
@@ -535,7 +623,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         await interaction.response.send_message(self._give_text(member, reason, duration_hours, extended, expires_at))
 
     # ---------- /pozor super ----------
-    @app_commands.command(name="super", description="Выдать супер позор: 10 минут без чата и ×100 в статистике")
+    @app_commands.command(name="super", description="Выдать супер позор: 10 минут без микрофона и ×100 в статистике")
     @app_commands.rename(member="участник", reason="причина")
     @app_commands.describe(member="Кого опозорить по-крупному", reason="Причина")
     @app_commands.checks.has_permissions(manage_roles=True)
@@ -600,9 +688,9 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             mute = _mute_left_minutes(super_row)
             reason = super_row["reason"] or "—"
             if mute is not None:
-                silence = f"молчит ещё {_fmt_minutes(mute)} мин"
+                silence = f"без микрофона ещё {_fmt_minutes(mute)} мин, слушать можно"
             else:
-                silence = "молчание уже кончилось"
+                silence = "микрофон уже можно включать"
             weight = SUPER_WEIGHT * len(super_rows)
             lines.append(f"Супер позор (×{weight}): {silence}. Снять может только админ. Причина: {reason}")
         if regular:
@@ -627,7 +715,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                 reason = reason[:77] + "..."
             if _is_super(row):
                 mute = _mute_left_minutes(row)
-                silence = f", молчит ещё {_fmt_minutes(mute)} мин" if mute is not None else ""
+                silence = f", без микрофона ещё {_fmt_minutes(mute)} мин" if mute is not None else ""
                 lines.append(f"<@{row['user_id']}> — супер позор (×{SUPER_WEIGHT}){silence} ({reason})")
                 continue
             try:
@@ -662,9 +750,9 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
             if row["active"] and _is_super(row):
                 mute = _mute_left_minutes(row)
                 if mute is not None:
-                    state = f"сейчас, молчит ещё {_fmt_minutes(mute)} мин. Снять может только админ."
+                    state = f"сейчас, без микрофона ещё {_fmt_minutes(mute)} мин. Снять может только админ."
                 else:
-                    state = "сейчас. Молчание кончилось, снять может только админ."
+                    state = "сейчас. Микрофон уже можно включать, снять метку может только админ."
             elif row["active"]:
                 try:
                     left = max(
@@ -912,6 +1000,35 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
         )
 
     @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """Пока идёт супер позор, человек остаётся в канале, слышит, но не говорит."""
+        if member.bot or after.channel is None:
+            return
+        key = (member.guild.id, member.id)
+        until = self._muted_until.get(key)
+        if until is not None and datetime.now(timezone.utc) < until:
+            if not after.mute:
+                await self._server_mute(member, True, "Супер позор")
+            return
+        if key not in self._unmute_later or not after.mute:
+            return
+        if await self._server_mute(member, False, "Супер позор: микрофон можно снова включать"):
+            await self._clear_bot_muted(member.guild.id, member.id)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Текстовый чат тоже молчит 10 минут. Голосовой канал при этом не трогаем."""
+        if message.guild is None or message.author.bot:
+            return
+        until = self._muted_until.get((message.guild.id, message.author.id))
+        if until is None or datetime.now(timezone.utc) >= until:
+            return
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if self.bot.user and payload.user_id == self.bot.user.id:
             return
@@ -947,6 +1064,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
                     "UPDATE shame_records SET active = 0, removed_reason = ?, removed_at = ? WHERE id = ?",
                     ("срок истёк, участник не на сервере", datetime.now(timezone.utc).isoformat(), row["id"]),
                 )
+        await self._lift_expired_voice_mutes()
 
     @tasks.loop(minutes=1)
     async def check_votes(self):
@@ -958,6 +1076,7 @@ class PozorCog(commands.GroupCog, name="pozor", description="Система по
     @check_expired_pozor.before_loop
     async def before_check_expired_pozor(self):
         await self.bot.wait_until_ready()
+        await self._lift_expired_voice_mutes()
 
     @check_votes.before_loop
     async def before_check_votes(self):
