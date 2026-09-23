@@ -12,7 +12,7 @@ log = logging.getLogger("cogs.roles")
 
 
 class RolesCog(commands.GroupCog, name="role", description="Управление ролями сервера"):
-    """Быстрое создание ролей, база ролей с описанием и топы по ролям.
+    """Быстрое создание ролей, регистрация уже существующих, база ролей с описанием и топы по ролям.
 
     Права на редактирование/удаление роли из базы:
     - роль с ролью "админ" (или указанная в /role setup) — может управлять любой ролью всегда;
@@ -121,37 +121,117 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
         )
         await interaction.followup.send(content=warning or None, embed=embed)
 
+    # ---------- /role register ----------
+    @app_commands.command(
+        name="register",
+        description="Зарегистрировать уже существующую роль и задать ей описание",
+    )
+    @app_commands.describe(
+        role="Роль, которая уже есть на сервере",
+        description="Описание роли",
+        criteria="За что выдаётся роль",
+        stackable="Можно ли выдавать роль одному человеку повторно (для очков в топе)",
+    )
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def register(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+        description: str,
+        criteria: str = "",
+        stackable: bool = False,
+    ):
+        if role.is_default():
+            await interaction.response.send_message("Роль @everyone зарегистрировать нельзя.", ephemeral=True)
+            return
+
+        existing = await self._get_role_record(interaction.guild.id, role.id)
+        if existing:
+            await interaction.response.send_message(
+                f"{role.mention} уже есть в базе. Описание можно изменить через /role edit.",
+                ephemeral=True,
+            )
+            return
+
+        settings = await get_settings(self.bot.db, interaction.guild.id)
+        window_hours = settings["role_edit_window_hours"] or config.DEFAULT_ROLE_EDIT_WINDOW_HOURS
+        editable_until = datetime.now(timezone.utc) + timedelta(hours=window_hours)
+
+        await self.bot.db.execute(
+            """INSERT INTO managed_roles
+               (role_id, guild_id, name, description, criteria, stackable, created_by, created_at, editable_until)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                role.id,
+                interaction.guild.id,
+                role.name,
+                description,
+                criteria,
+                int(stackable),
+                interaction.user.id,
+                datetime.now(timezone.utc).isoformat(),
+                editable_until.isoformat(),
+            ),
+        )
+
+        embed = discord.Embed(title=f"Роль «{role.name}» зарегистрирована", colour=role.colour)
+        embed.add_field(name="Описание", value=description, inline=False)
+        embed.add_field(name="За что выдаётся", value=criteria or "—", inline=False)
+        embed.add_field(name="Повторная выдача", value="Да" if stackable else "Нет")
+        embed.set_footer(text="Роль видна в /role list, подробности — в /role info.")
+        await interaction.response.send_message(embed=embed)
+
     # ---------- /role list ----------
-    @app_commands.command(name="list", description="Показать все роли, зарегистрированные в базе")
+    @app_commands.command(name="list", description="Показать все роли из базы: созданные и зарегистрированные")
     async def list_roles(self, interaction: discord.Interaction):
         rows = await self.bot.db.fetchall(
             "SELECT * FROM managed_roles WHERE guild_id = ? ORDER BY created_at", (interaction.guild.id,)
         )
         if not rows:
-            await interaction.response.send_message("В базе пока нет ни одной роли. Создайте её через /role create.")
+            await interaction.response.send_message(
+                "В базе пока нет ни одной роли. Создайте её через /role create "
+                "или зарегистрируйте существующую через /role register."
+            )
             return
 
-        embed = discord.Embed(title="Роли сервера", colour=discord.Colour.blurple())
-        for row in rows[:25]:
-            discord_role = interaction.guild.get_role(row["role_id"])
-            role_mention = discord_role.mention if discord_role else f"(удалена) {row['name']}"
-            embed.add_field(
-                name=f"{row['name']} — {role_mention}",
-                value=f"{row['description']}\n*За что:* {row['criteria']}",
-                inline=False,
-            )
-        await interaction.response.send_message(embed=embed)
+        fields_per_embed = 25
+        max_embeds = 10
+        shown = rows[: fields_per_embed * max_embeds]
+        embeds = []
+        for offset in range(0, len(shown), fields_per_embed):
+            chunk = shown[offset : offset + fields_per_embed]
+            embed = discord.Embed(title="Роли сервера", colour=discord.Colour.blurple())
+            if offset:
+                embed.title = f"Роли сервера ({offset // fields_per_embed + 1})"
+            for row in chunk:
+                discord_role = interaction.guild.get_role(row["role_id"])
+                role_name = discord_role.name if discord_role else row["name"]
+                role_mention = discord_role.mention if discord_role else "(удалена)"
+                description = row["description"] or "—"
+                criteria = row["criteria"] or "—"
+                embed.add_field(
+                    name=f"{role_name} — {role_mention}",
+                    value=f"{description}\n*За что:* {criteria}",
+                    inline=False,
+                )
+            embeds.append(embed)
+        if len(rows) > len(shown):
+            embeds[-1].set_footer(text=f"Показаны первые {len(shown)} из {len(rows)}.")
+        await interaction.response.send_message(embeds=embeds)
 
     # ---------- /role info ----------
     @app_commands.command(name="info", description="Подробная информация о роли")
     async def info(self, interaction: discord.Interaction, role: discord.Role):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
-            await interaction.response.send_message("Эта роль не зарегистрирована в базе бота.", ephemeral=True)
+            await interaction.response.send_message(
+                "У этой роли ещё нет описания в базе. Добавьте его через /role register.",
+                ephemeral=True,
+            )
             return
 
         holders = [m for m in interaction.guild.members if role in m.roles]
-        embed = discord.Embed(title=f"Роль: {record['name']}", colour=role.colour)
+        embed = discord.Embed(title=f"Роль: {role.name}", colour=role.colour)
         embed.add_field(name="Описание", value=record["description"] or "—", inline=False)
         embed.add_field(name="За что выдаётся", value=record["criteria"] or "—", inline=False)
         embed.add_field(name="Носителей сейчас", value=str(len(holders)))
@@ -186,8 +266,8 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
             await interaction.response.send_message(
-                "Эта роль не зарегистрирована в базе. Сначала создайте её через /role create "
-                "(или зарегистрируйте существующую вручную в БД).",
+                "Эта роль не зарегистрирована в базе. Создайте её через /role create "
+                "или добавьте существующую через /role register.",
                 ephemeral=True,
             )
             return
@@ -216,7 +296,10 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
     async def top(self, interaction: discord.Interaction, role: discord.Role, limit: int = 10):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
-            await interaction.response.send_message("Эта роль не зарегистрирована в базе.", ephemeral=True)
+            await interaction.response.send_message(
+                "Эта роль не зарегистрирована в базе. Добавьте её через /role register.",
+                ephemeral=True,
+            )
             return
 
         limit = max(1, min(limit, 25))
@@ -269,7 +352,10 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
     ):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
-            await interaction.response.send_message("Эта роль не зарегистрирована в базе бота.", ephemeral=True)
+            await interaction.response.send_message(
+                "Эта роль не зарегистрирована в базе. Сначала добавьте описание через /role register.",
+                ephemeral=True,
+            )
             return
 
         if not await self._can_manage_role(interaction, record):
@@ -323,7 +409,10 @@ class RolesCog(commands.GroupCog, name="role", description="Управление
     async def delete(self, interaction: discord.Interaction, role: discord.Role, delete_from_discord: bool = False):
         record = await self._get_role_record(interaction.guild.id, role.id)
         if not record:
-            await interaction.response.send_message("Эта роль не зарегистрирована в базе бота.", ephemeral=True)
+            await interaction.response.send_message(
+                "Эта роль не зарегистрирована в базе. Добавить её можно через /role register.",
+                ephemeral=True,
+            )
             return
 
         if not await self._can_manage_role(interaction, record):

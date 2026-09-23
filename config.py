@@ -21,6 +21,8 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 DEFAULT_VOTE_THRESHOLD = int(os.getenv("VOTE_THRESHOLD", "3"))
 DEFAULT_VOTE_DURATION_HOURS = float(os.getenv("VOTE_DURATION_HOURS", "24"))
+# Сколько часов после снятия позора нельзя снова запускать голосование за выдачу.
+DEFAULT_POZOR_COOLDOWN_HOURS = float(os.getenv("POZOR_COOLDOWN_HOURS", "6"))
 
 # Права на редактирование/удаление ролей, созданных через бота.
 # Названия ролей по умолчанию — можно переопределить в .env, либо позже

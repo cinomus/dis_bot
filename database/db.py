@@ -104,6 +104,9 @@ class Database:
         await self._ensure_column("guild_settings", "admin_role_id", "INTEGER")
         await self._ensure_column("guild_settings", "trusted_role_id", "INTEGER")
         await self._ensure_column("guild_settings", "role_edit_window_hours", "REAL DEFAULT 24")
+        # Когда позор сняли — нужно для истории, топа и кулдауна нового голосования.
+        await self._ensure_column("shame_records", "removed_at", "TEXT")
+        await self._ensure_column("guild_settings", "pozor_cooldown_hours", "REAL")
 
     async def close(self):
         if self.conn:

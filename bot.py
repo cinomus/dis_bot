@@ -58,7 +58,7 @@ bot = MyBot()
 @bot.event
 async def on_ready():
     log.info("Бот запущен как %s (ID: %s)", bot.user, bot.user.id)
-    await bot.change_presence(activity=discord.Game(name="/role, /shame, /ask"))
+    await bot.change_presence(activity=discord.Game(name="/role, /pozor, /ask"))
 
 
 async def main():
