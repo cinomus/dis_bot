@@ -11,13 +11,14 @@ GUILD_ID = os.getenv("GUILD_ID")
 
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+# Один ключ NordRouter на все модели. ID — из каталога https://nordrouter.com (с префиксом провайдера).
+NORDROUTER_API_KEY = os.getenv("NORDROUTER_API_KEY")
+NORDROUTER_BASE_URL = os.getenv("NORDROUTER_BASE_URL", "https://nordrouter.com/v1").rstrip("/")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+CHATGPT_MODEL = os.getenv("CHATGPT_MODEL", "openai/gpt-5.4-mini")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "anthropic/claude-sonnet-4.6")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-3.5-flash")
+NANO_BANANA_MODEL = os.getenv("NANO_BANANA_MODEL", "google/gemini-3.1-flash-image-preview")
 
 DEFAULT_VOTE_THRESHOLD = int(os.getenv("VOTE_THRESHOLD", "3"))
 DEFAULT_VOTE_DURATION_HOURS = float(os.getenv("VOTE_DURATION_HOURS", "24"))
