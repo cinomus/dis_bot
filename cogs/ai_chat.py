@@ -13,7 +13,11 @@ import config
 
 log = logging.getLogger("cogs.ai_chat")
 
-_DATA_URL = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
+_DATA_URL = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL | re.IGNORECASE)
+_DATA_URL_IN_TEXT = re.compile(
+    r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+",
+    re.IGNORECASE,
+)
 _IMAGE_EXT = {
     "image/png": "png",
     "image/jpeg": "jpg",
@@ -62,8 +66,8 @@ def _decode_data_url(url: str) -> tuple[bytes, str] | None:
 
 def _image_urls(value) -> list[str]:
     urls: list[str] = []
-    if isinstance(value, str) and value.startswith("data:image/"):
-        urls.append(value)
+    if isinstance(value, str):
+        urls.extend(_DATA_URL_IN_TEXT.findall(value))
     elif isinstance(value, dict):
         direct = value.get("url")
         if isinstance(direct, str):
@@ -165,10 +169,20 @@ class AIChatCog(commands.Cog):
             data = await self._complete(spec["model"], prompt, image=spec["image"])
             choices = data.get("choices") or []
             message = (choices[0].get("message") if choices else None) or {}
-            answer = _message_text(message)
-            images = _message_images(message) if spec["image"] else []
+            if spec["image"]:
+                images = _message_images(message)
+                if not images:
+                    await interaction.followup.send("⚠️ Модель не вернула картинку.")
+                    return
+                files = [
+                    discord.File(BytesIO(raw), filename=f"nano-banana-{index}.{ext}")
+                    for index, (raw, ext) in enumerate(images[:4], start=1)
+                ]
+                await interaction.followup.send(files=files)
+                return
 
-            if not answer and not images:
+            answer = _message_text(message)
+            if not answer:
                 await interaction.followup.send("⚠️ Модель не вернула ответ.")
                 return
 
@@ -177,20 +191,11 @@ class AIChatCog(commands.Cog):
 
             embed = discord.Embed(
                 title=f"Ответ ({spec['name']})",
-                description=answer or None,
+                description=answer,
                 colour=discord.Colour.green(),
             )
             embed.set_footer(text=f"Вопрос от {interaction.user.display_name}")
-
-            files = []
-            for index, (raw, ext) in enumerate(images[:4], start=1):
-                filename = f"nano-banana-{index}.{ext}"
-                files.append(discord.File(BytesIO(raw), filename=filename))
-            if files:
-                embed.set_image(url=f"attachment://{files[0].filename}")
-                await interaction.followup.send(embed=embed, files=files)
-            else:
-                await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed)
         except Exception as exc:
             log.exception("Ошибка запроса к %s", provider.value)
             try:
