@@ -25,6 +25,15 @@ _IMAGE_EXT = {
     "image/gif": "gif",
 }
 
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_MIME_BY_SUFFIX = (
+    (".png", "image/png"),
+    (".jpg", "image/jpeg"),
+    (".jpeg", "image/jpeg"),
+    (".webp", "image/webp"),
+    (".gif", "image/gif"),
+)
+
 MODELS = {
     "chatgpt": {"name": "ChatGPT", "model": config.CHATGPT_MODEL, "image": False},
     "claude": {"name": "Claude", "model": config.CLAUDE_MODEL, "image": False},
@@ -93,6 +102,19 @@ def _message_images(message: dict) -> list[tuple[bytes, str]]:
     return images
 
 
+def _attachment_mime(attachment: discord.Attachment) -> str | None:
+    content_type = (attachment.content_type or "").split(";")[0].strip().lower()
+    if content_type == "image/jpg":
+        content_type = "image/jpeg"
+    if content_type in _IMAGE_EXT:
+        return content_type
+    name = (attachment.filename or "").lower()
+    for suffix, mime in _MIME_BY_SUFFIX:
+        if name.endswith(suffix):
+            return mime
+    return None
+
+
 def _message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -123,7 +145,14 @@ class AIChatCog(commands.Cog):
         if self.session:
             await self.session.close()
 
-    async def _complete(self, model: str, prompt: str, *, image: bool) -> dict:
+    async def _complete(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        image: bool,
+        source: tuple[bytes, str] | None = None,
+    ) -> dict:
         if not config.NORDROUTER_API_KEY:
             raise RuntimeError("NORDROUTER_API_KEY не настроен на сервере.")
         if self.session is None:
@@ -133,9 +162,18 @@ class AIChatCog(commands.Cog):
             "Authorization": f"Bearer {config.NORDROUTER_API_KEY}",
             "Content-Type": "application/json",
         }
+        if source is not None:
+            raw, mime = source
+            encoded = base64.b64encode(raw).decode("ascii")
+            content: str | list = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
+            ]
+        else:
+            content = prompt
         payload: dict = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
         }
         if image:
             payload["modalities"] = ["image", "text"]
@@ -154,11 +192,21 @@ class AIChatCog(commands.Cog):
                 raise RuntimeError(_error_message(data, resp.status))
             return data
 
-    @app_commands.command(name="ask", description="Спросить ChatGPT, Claude, Gemini или сгенерировать картинку Nano Banana")
-    @app_commands.rename(provider="модель", prompt="запрос")
-    @app_commands.describe(provider="Какую модель спросить", prompt="Вопрос или описание картинки")
+    @app_commands.command(name="ask", description="Спросить ChatGPT, Claude, Gemini или сгенерировать и править картинку Nano Banana")
+    @app_commands.rename(provider="модель", prompt="запрос", picture="картинка")
+    @app_commands.describe(
+        provider="Какую модель спросить",
+        prompt="Вопрос, описание новой картинки или что изменить",
+        picture="Картинка для правки. Работает только с Nano Banana",
+    )
     @app_commands.choices(provider=PROVIDER_CHOICES)
-    async def ask(self, interaction: discord.Interaction, provider: app_commands.Choice[str], prompt: str):
+    async def ask(
+        self,
+        interaction: discord.Interaction,
+        provider: app_commands.Choice[str],
+        prompt: str,
+        picture: discord.Attachment | None = None,
+    ):
         await interaction.response.defer(thinking=True)
         try:
             spec = MODELS.get(provider.value)
@@ -166,7 +214,21 @@ class AIChatCog(commands.Cog):
                 await interaction.followup.send("⚠️ Неизвестная модель.")
                 return
 
-            data = await self._complete(spec["model"], prompt, image=spec["image"])
+            source = None
+            if picture is not None:
+                if not spec["image"]:
+                    await interaction.followup.send("⚠️ Картинку можно передать только модели Nano Banana.")
+                    return
+                mime = _attachment_mime(picture)
+                if mime is None:
+                    await interaction.followup.send("⚠️ Нужен файл PNG, JPEG, WEBP или GIF.")
+                    return
+                if picture.size > _MAX_IMAGE_BYTES:
+                    await interaction.followup.send("⚠️ Картинка больше 8 МБ.")
+                    return
+                source = (await picture.read(), mime)
+
+            data = await self._complete(spec["model"], prompt, image=spec["image"], source=source)
             choices = data.get("choices") or []
             message = (choices[0].get("message") if choices else None) or {}
             if spec["image"]:
