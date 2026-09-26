@@ -156,45 +156,47 @@ class AIChatCog(commands.Cog):
     @app_commands.choices(provider=PROVIDER_CHOICES)
     async def ask(self, interaction: discord.Interaction, provider: app_commands.Choice[str], prompt: str):
         await interaction.response.defer(thinking=True)
-        spec = MODELS.get(provider.value)
-        if spec is None:
-            await interaction.followup.send("⚠️ Неизвестная модель.")
-            return
-
         try:
+            spec = MODELS.get(provider.value)
+            if spec is None:
+                await interaction.followup.send("⚠️ Неизвестная модель.")
+                return
+
             data = await self._complete(spec["model"], prompt, image=spec["image"])
+            choices = data.get("choices") or []
+            message = (choices[0].get("message") if choices else None) or {}
+            answer = _message_text(message)
+            images = _message_images(message) if spec["image"] else []
+
+            if not answer and not images:
+                await interaction.followup.send("⚠️ Модель не вернула ответ.")
+                return
+
+            if len(answer) > 1900:
+                answer = answer[:1900] + "…"
+
+            embed = discord.Embed(
+                title=f"Ответ ({spec['name']})",
+                description=answer or None,
+                colour=discord.Colour.green(),
+            )
+            embed.set_footer(text=f"Вопрос от {interaction.user.display_name}")
+
+            files = []
+            for index, (raw, ext) in enumerate(images[:4], start=1):
+                filename = f"nano-banana-{index}.{ext}"
+                files.append(discord.File(BytesIO(raw), filename=filename))
+            if files:
+                embed.set_image(url=f"attachment://{files[0].filename}")
+                await interaction.followup.send(embed=embed, files=files)
+            else:
+                await interaction.followup.send(embed=embed)
         except Exception as exc:
             log.exception("Ошибка запроса к %s", provider.value)
-            await interaction.followup.send(f"⚠️ Ошибка: {exc}")
-            return
-
-        choices = data.get("choices") or []
-        message = (choices[0].get("message") if choices else None) or {}
-        answer = _message_text(message)
-        images = _message_images(message) if spec["image"] else []
-
-        if not answer and not images:
-            await interaction.followup.send("⚠️ Модель не вернула ответ.")
-            return
-
-        if len(answer) > 1900:
-            answer = answer[:1900] + "…"
-
-        embed = discord.Embed(
-            title=f"Ответ ({spec['name']})",
-            description=answer or None,
-            colour=discord.Colour.green(),
-        )
-        embed.set_footer(text=f"Вопрос от {interaction.user.display_name}")
-
-        files = []
-        for index, (raw, ext) in enumerate(images[:4], start=1):
-            filename = f"nano-banana-{index}.{ext}"
-            files.append(discord.File(BytesIO(raw), filename=filename))
-        if files:
-            embed.set_image(url=f"attachment://{files[0].filename}")
-
-        await interaction.followup.send(embed=embed, files=files or None)
+            try:
+                await interaction.followup.send(f"⚠️ Ошибка: {exc}")
+            except Exception:
+                log.exception("Не удалось отправить сообщение об ошибке")
 
 
 async def setup(bot: commands.Bot):
