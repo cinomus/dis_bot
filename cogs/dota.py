@@ -164,14 +164,26 @@ def _pages(title: str, text: str, footer: str) -> list[discord.Embed]:
     return embeds
 
 
+def _dota_cog(client) -> "DotaCog | None":
+    """Группа /dota регистрирует ког под именем dota, не DotaCog."""
+    for key in ("dota", "DotaCog"):
+        cog = client.get_cog(key)
+        if isinstance(cog, DotaCog):
+            return cog
+    for cog in client.cogs.values():
+        if isinstance(cog, DotaCog):
+            return cog
+    return None
+
+
 class RoastView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Унизь меня", style=discord.ButtonStyle.danger, custom_id="dota:roast")
     async def roast(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = interaction.client.get_cog("DotaCog")
-        if not isinstance(cog, DotaCog):
+        cog = _dota_cog(interaction.client)
+        if cog is None:
             await interaction.response.send_message("Тренер спит.", ephemeral=True)
             return
         await cog.deliver_roast(interaction)
