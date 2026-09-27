@@ -66,6 +66,27 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     vote_duration_hours REAL DEFAULT 24,
     log_channel_id INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS dota_players (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    persona TEXT DEFAULT '',
+    watch INTEGER DEFAULT 1,
+    linked_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dota_players_account
+    ON dota_players (guild_id, account_id);
+
+CREATE TABLE IF NOT EXISTS dota_seen_matches (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    match_id INTEGER NOT NULL,
+    offered_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id, match_id)
+);
 """
 
 
@@ -121,6 +142,9 @@ class Database:
         await self._ensure_column("shame_records", "locked_channel_id", "INTEGER")
         # 1 — роль «грузчик» снял бот и после снятия супер позора её нужно вернуть.
         await self._ensure_column("shame_records", "loader_removed", "INTEGER DEFAULT 0")
+        # Канал, куда тренер пишет о новых катках, и модель разбора.
+        await self._ensure_column("guild_settings", "dota_channel_id", "INTEGER")
+        await self._ensure_column("guild_settings", "dota_model", "TEXT")
 
     async def close(self):
         if self.conn:

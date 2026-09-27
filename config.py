@@ -33,5 +33,16 @@ ROLE_ADMIN_NAME = os.getenv("ROLE_ADMIN_NAME", "админ")
 ROLE_TRUSTED_NAME = os.getenv("ROLE_TRUSTED_NAME", "бро <3")
 DEFAULT_ROLE_EDIT_WINDOW_HOURS = float(os.getenv("ROLE_EDIT_WINDOW_HOURS", "24"))
 
+# Необязательный ключ OpenDota. Без него разбор тоже работает, просто лимит запросов ниже.
+OPENDOTA_API_KEY = os.getenv("OPENDOTA_API_KEY") or None
+DOTA_COACH_MODEL = os.getenv("DOTA_COACH_MODEL", "claude").strip().lower()
+if DOTA_COACH_MODEL not in ("chatgpt", "claude", "gemini"):
+    DOTA_COACH_MODEL = "claude"
+try:
+    DOTA_POLL_MINUTES = float(os.getenv("DOTA_POLL_MINUTES", "4"))
+except ValueError:
+    DOTA_POLL_MINUTES = 4.0
+DOTA_POLL_MINUTES = max(DOTA_POLL_MINUTES, 2.0)
+
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN не задан. Создайте файл .env на основе .env.example.")
