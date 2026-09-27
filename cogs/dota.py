@@ -66,17 +66,23 @@ COACH_PROMPT = """Ты — самый злой тренер Dota 2 в русск
 - Линия красная — смотри, ушёл ли он в лес или продолжил кормить ту же волну как идиот.
 - Смерти дели на неизбежные, свою вину, допустимый трейд и чистый слив. В ответ тащи только слив.
 - После каждого оскорбления — что делать в следующей катке. Короткий приказ, не лекция.
+- Если в данных есть блоки «ПОДРОБНО», это свои с сервера, и они были в этом матче. Их разбирай первыми и гораздо подробнее остальных. По каждому отдельно: кто (ник, герой, роль), где (линия и точка варда, если она есть в данных), когда (минута смерти, тайминг предмета, драка). Чужих из состава — максимум одна злая строка на всех.
 
 Запрещено:
-- Выдумывать цифры, предметы, руны, варды и драки, которых нет во входных данных. Нет данных — так и скажи, с матом.
+- Выдумывать цифры, предметы, руны, варды, линии и драки, которых нет во входных данных. Нет минуты или точки — не выдумывай место. Скажи, что в логе пусто, и ори по тому, что есть.
 - Бить по национальности, полу, ориентации, внешности, болезням, возрасту и семье. Унижай игру и игрока как игрока.
-- Растягивать текст. Максимум 1500 символов.
+- Один свой: максимум 1800 символов. Несколько своих: 500–700 символов на каждого, потолок 4000. Чужих не раздувай.
 
-Если первая строка «РЕЖИМ: вся катка», ори на обе пачки и называй героев. Одного игрока не выдумывай.
+Если первая строка «РЕЖИМ: вся катка», своих в матче нет. Ори на тех, кто кормил, и называй героев.
 
-Формат, заголовки дословно:
-**Короче.** Одна фраза с матом и обзывательством, как будто трон только что упал.
-**Где слил.** 2–4 предложения. Мат, кличка и цифры из данных.
+Формат, если своих несколько:
+**Короче.** Одна фраза на всю пачку.
+Дальше на каждого своего отдельным абзацем: ник, кто он, где стоял и в какую минуту слил. Цифры обязательны.
+**Чтоб не быть чмом.** По одному приказу на каждого своего.
+
+Формат, если свой один:
+**Короче.** Одна фраза с матом, как будто трон только что упал.
+**Где слил.** Кто, где и когда. Минуты и место из данных.
 **Претензии.** Три пункта. В каждом обзывательство и цифра.
 **Чтоб не быть чмом.** Три коротких приказа.
 """
@@ -137,6 +143,11 @@ def _split(text: str, limit: int = 1800) -> list[str]:
         parts.append(rest[:cut].strip())
         rest = rest[cut:].strip()
     return parts
+
+
+def _ping(mentions: list[int], fallback: int) -> str:
+    ids = mentions or [fallback]
+    return " ".join(f"<@{item}>" for item in ids)
 
 
 def _pages(title: str, text: str, footer: str) -> list[discord.Embed]:
@@ -367,6 +378,13 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         embed.set_footer(text=offer_footer(int(match["match_id"]), account_id, user_id))
         await channel.send(content=f"<@{user_id}>", embed=embed, view=RoastView())
 
+    async def _guild_links(self, guild_id: int) -> list[tuple[int, int, str]]:
+        rows = await self.bot.db.fetchall(
+            "SELECT account_id, user_id, persona FROM dota_players WHERE guild_id = ?",
+            (guild_id,),
+        )
+        return [(int(row["account_id"]), int(row["user_id"]), row["persona"] or "") for row in rows]
+
     async def _complete(self, model_key: str, brief: str) -> str:
         if not config.NORDROUTER_API_KEY:
             raise DotaUserError("NORDROUTER_API_KEY не настроен, тренеру нечем думать.")
@@ -376,9 +394,9 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             "model": _model_id(model_key),
             "messages": [
                 {"role": "system", "content": COACH_PROMPT},
-                {"role": "user", "content": "Разбери катку по этим данным.\n\n" + brief[:12000]},
+                {"role": "user", "content": "Разбери катку по этим данным. Своих из блоков ПОДРОБНО — первыми, кто где и когда слил.\n\n" + brief[:14000]},
             ],
-            "max_tokens": 1400,
+            "max_tokens": 2400 if brief.count("=== ПОДРОБНО") > 1 else 1600,
         }
         headers = {
             "Authorization": f"Bearer {config.NORDROUTER_API_KEY}",
@@ -406,24 +424,31 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             raise DotaUserError("Модель промолчала. Даже ей стыдно за эту катку.")
         return answer
 
-    async def _analyze(self, match_id: int, account_id: int, model_key: str) -> str:
+    async def _analyze(self, match_id: int, account_id: int, model_key: str, guild_id: int) -> tuple[str, list[int]]:
         await self._ensure_names()
+        linked = await self._guild_links(guild_id)
         try:
             match = await self._api().match(match_id)
         except OpenDotaError as exc:
             raise DotaUserError(_public_error(exc)) from exc
         names = self._api().names
         try:
-            brief = build_brief(match, account_id, names)
+            brief = build_brief(match, account_id, names, linked)
         except MatchNotReady as exc:
             await self._api().request_parse(match_id)
             raise DotaUserError(str(exc)) from exc
         except PlayerNotInMatch:
             brief = (
                 "Заказанного аккаунта в матче нет: профиль скрыт или это чужая катка.\n"
-                + build_brief(match, 0, names)
+                + build_brief(match, 0, names, linked)
             )
-        return await self._complete(model_key, brief)
+        mentions = []
+        for _aid, discord_id, _persona in linked:
+            token = f"<@{discord_id}>"
+            if token in brief:
+                mentions.append((brief.index(token), discord_id))
+        mentions.sort()
+        return await self._complete(model_key, brief), [discord_id for _pos, discord_id in mentions]
 
     async def deliver_roast(self, interaction: discord.Interaction):
         footer = None
@@ -441,14 +466,14 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         try:
             settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, None)
-            text = await self._analyze(match_id, account_id, model_key)
+            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id)
         except Exception as exc:
             log.exception("Разбор матча %s не удался", match_id)
             await self._fail(interaction, exc)
             return
         embeds = _pages("Получай, чмо", text, f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota")
         await interaction.followup.send(
-            content=f"<@{user_id}>\nhttps://www.opendota.com/matches/{match_id}",
+            content=f"{_ping(mentions, user_id)}\nhttps://www.opendota.com/matches/{match_id}",
             embeds=embeds,
         )
 
@@ -642,14 +667,14 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, model)
             match_id = int(recent[0]["match_id"])
-            text = await self._analyze(match_id, int(row["account_id"]), model_key)
+            text, mentions = await self._analyze(match_id, int(row["account_id"]), model_key, interaction.guild.id)
             embeds = _pages(
                 f"Разнос для {target.display_name}, садись",
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
             )
             await interaction.followup.send(
-                content=f"{target.mention}\nhttps://www.opendota.com/matches/{match_id}",
+                content=f"{_ping(mentions, target.id)}\nhttps://www.opendota.com/matches/{match_id}",
                 embeds=embeds,
             )
         except Exception as exc:
@@ -689,14 +714,14 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             account_id = int(row["account_id"]) if row else 0
             settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, model)
-            text = await self._analyze(match_id, account_id, model_key)
+            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id)
             embeds = _pages(
                 "Разнос. Без вазелина.",
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
             )
             await interaction.followup.send(
-                content=f"{target.mention}\nhttps://www.opendota.com/matches/{match_id}",
+                content=f"{_ping(mentions, target.id)}\nhttps://www.opendota.com/matches/{match_id}",
                 embeds=embeds,
             )
         except Exception as exc:

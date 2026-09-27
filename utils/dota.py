@@ -496,30 +496,146 @@ def _header(match: dict, won: bool | None, result_label: str | None = None) -> l
     return lines
 
 
-def build_brief(match: dict, account_id: int, names: Names) -> str:
-    """Текст для модели. account_id=0 — разбор всей катки."""
+def _lane_label(player: dict) -> str:
+    lanes = {1: "сейф", 2: "мид", 3: "офф", 4: "лес"}
+    lane = lanes.get(_int(player.get("lane_role")), "линия неясна")
+    if player.get("is_roaming"):
+        lane += ", роум"
+    return lane
+
+
+def _coords_label(key) -> str:
+    if isinstance(key, (list, tuple)) and len(key) >= 2:
+        nums = list(key[:2])
+    else:
+        found = re.findall(r"-?\d+", str(key or ""))
+        if len(found) < 2:
+            return ""
+        nums = found[:2]
+    try:
+        x, y = int(nums[0]), int(nums[1])
+    except (TypeError, ValueError):
+        return ""
+    wide = abs(x) > 1000 or abs(y) > 1000
+    left, right = (-2000, 2000) if wide else (40, 88)
+    low, high = (-2000, 2000) if wide else (40, 88)
+    horiz = "лево" if x < left else "право" if x > right else "центр"
+    vert = "низ" if y < low else "верх" if y > high else "середина"
+    return f"{vert}-{horiz}"
+
+
+def _ward_spots(player: dict) -> str:
+    bits = []
+    for field, label in (("obs_log", "обс"), ("sen_log", "сентря")):
+        for entry in player.get(field) or []:
+            if not isinstance(entry, dict):
+                continue
+            place = _coords_label(entry.get("key") or entry.get("position"))
+            spot = f" {place}" if place else ""
+            bits.append(f"{label} {fmt_game_time(entry.get('time'))}{spot}")
+            if len(bits) >= 6:
+                return ", ".join(bits)
+    return ", ".join(bits) if bits else "точек вардов в логе нет"
+
+
+def _farm_marks(player: dict) -> str:
+    last_hits = _series(player.get("lh_t"))
+    parts = []
+    for minute in (10, 15, 20):
+        value = _at(last_hits, minute)
+        if value is not None:
+            parts.append(f"LH{minute} {value}")
+    return ", ".join(parts) if parts else "поминутного фарма нет"
+
+
+def _death_moments(match: dict, focus_index: int) -> str:
+    events = []
+    for fight in match.get("teamfights") or []:
+        if not isinstance(fight, dict):
+            continue
+        slots = fight.get("players") or []
+        if focus_index >= len(slots) or not isinstance(slots[focus_index], dict):
+            continue
+        slot = slots[focus_index]
+        if _int(slot.get("deaths")) <= 0:
+            continue
+        events.append((
+            _int(fight.get("start")),
+            f"{fmt_game_time(fight.get('start'))}: сдох в драке, урон {_int(slot.get('damage'))}, "
+            f"золото {_int(slot.get('gold_delta')):+}",
+        ))
+    events.sort()
+    if not events:
+        return "лог драк не показывает, в какую минуту сдох"
+    return "\n".join(f"- {text}" for _, text in events[:8])
+
+
+def _select_focuses(
+    players: list[dict],
+    account_id: int,
+    linked: list[tuple[int, int, str]],
+) -> list[tuple[dict, int | None, str]]:
+    """Сначала запрошенный, потом остальные свои, кто реально сидел в матче."""
+    by_account = {}
+    for player in players:
+        aid = _int(player.get("account_id"))
+        if aid:
+            by_account[aid] = player
+    ordered = []
+    seen: set[int] = set()
+    if account_id and account_id in by_account:
+        meta = next((item for item in linked if int(item[0]) == int(account_id)), None)
+        ordered.append((by_account[account_id], meta[1] if meta else None, meta[2] if meta else ""))
+        seen.add(int(account_id))
+    for aid, discord_id, persona in linked:
+        aid = int(aid)
+        if aid in seen or aid not in by_account:
+            continue
+        ordered.append((by_account[aid], int(discord_id), persona or ""))
+        seen.add(aid)
+    return ordered
+
+
+def build_brief(
+    match: dict,
+    account_id: int,
+    names: Names,
+    linked: list[tuple[int, int, str]] | None = None,
+) -> str:
+    """Текст для модели. Свои из linked, кто был в матче, идут первыми и подробно."""
     raw_players = match.get("players") or []
     if not raw_players:
         raise MatchNotReady("OpenDota ещё не разобрал этот реплей. Я запросил разбор — попробуй через пару минут.")
     players = assign_positions([dict(player) for player in raw_players])
-    if not account_id:
+    focuses = _select_focuses(players, int(account_id or 0), list(linked or []))
+    if not focuses:
+        if account_id:
+            raise PlayerNotInMatch("Этого аккаунта нет в матче: профиль скрыт или это не его катка.")
         return _match_brief(match, players, names)
-
-    focus = next((player for player in players if _int(player.get("account_id")) == int(account_id)), None)
-    if focus is None:
-        raise PlayerNotInMatch("Этого аккаунта нет в матче: профиль скрыт или это не его катка.")
-    return _focus_brief(match, players, focus, names)
+    return _linked_brief(match, players, focuses, int(account_id or 0), names)
 
 
-def _focus_brief(match: dict, players: list[dict], focus: dict, names: Names) -> str:
-    won = player_won(focus, match)
+def _player_detail(
+    match: dict,
+    players: list[dict],
+    focus: dict,
+    discord_id: int | None,
+    persona: str,
+    names: Names,
+) -> list[str]:
     is_radiant = focus.get("player_slot", 0) < 128
     position = focus.get("position")
-    lines = _header(match, won)
-    lines.append(
-        f"Игрок: {focus.get('personaname') or 'без ника'} · {names.hero(focus.get('hero_id'))} · "
-        f"{'Radiant' if is_radiant else 'Dire'} · поз {position} ({POSITIONS.get(position, '?')})"
-    )
+    nick = focus.get("personaname") or persona or "без ника"
+    label = nick
+    if persona and persona != nick:
+        label = f"{nick} ({persona})"
+    if discord_id:
+        label += f" <@{discord_id}>"
+    lines = [
+        f"=== ПОДРОБНО: {label} · {names.hero(focus.get('hero_id'))} · "
+        f"{'Radiant' if is_radiant else 'Dire'} · поз {position} ({POSITIONS.get(position, '?')}) ===",
+        f"Где стоял: {_lane_label(focus)}.",
+    ]
     if position in ROLE_HINTS:
         lines.append(f"Как судить роль: {ROLE_HINTS[position]}")
     lines.append(
@@ -539,15 +655,7 @@ def _focus_brief(match: dict, players: list[dict], focus: dict, names: Names) ->
         f"станы {_num(focus.get('stuns'), 0)} · APM {_int(focus.get('actions_per_min'))} · "
         f"эффективность линии {_pct(focus.get('lane_efficiency_pct', focus.get('lane_efficiency')))}"
     )
-    lh10 = _at(_series(focus.get("lh_t")), 10)
-    dn10 = _at(_series(focus.get("dn_t")), 10)
-    gold10 = _at(_series(focus.get("gold_t")), 10)
-    if any(value is not None for value in (lh10, dn10, gold10)):
-        lines.append(
-            f"К 10 мин: LH {lh10 if lh10 is not None else '?'}, "
-            f"денаи {dn10 if dn10 is not None else '?'}, "
-            f"золото {gold10 if gold10 is not None else '?'}"
-        )
+    lines.append(f"Фарм по минутам: {_farm_marks(focus)}")
     leaver = _int(focus.get("leaver_status"))
     if leaver:
         lines.append(f"Не доиграл матч, код выхода {leaver}.")
@@ -559,20 +667,48 @@ def _focus_brief(match: dict, players: list[dict], focus: dict, names: Names) ->
         + ", скипетр "
         + ("да" if focus.get("aghanims_scepter") else "нет")
     )
-    lines.append(f"Заметные покупки: {_notable_purchases(focus, names)}")
+    lines.append(f"Когда покупал: {_notable_purchases(focus, names)}")
+    lines.append(f"Где ставил варды: {_ward_spots(focus)}")
     lines.append(f"Кто его убивал: {_killed_by(focus, names)}")
     lines.append(f"Бенчмарки героя, процентиль: {_benchmarks(focus)}")
-    lines.append(_gold_note(_series(match.get("radiant_gold_adv")), is_radiant))
+    lines.append("Когда сдох:")
+    lines.append(_death_moments(match, players.index(focus)))
+    return lines
+
+
+def _linked_brief(
+    match: dict,
+    players: list[dict],
+    focuses: list[tuple[dict, int | None, str]],
+    account_id: int,
+    names: Names,
+) -> str:
+    present = {_int(player.get("account_id")) for player in players}
+    won = player_won(focuses[0][0], match)
+    lines = []
+    if account_id and account_id not in present:
+        lines.append("Заказанного аккаунта в матче нет. Ниже свои, кто реально играл.")
+    if len(focuses) == 1:
+        lines.append("СВОЙ В МАТЧЕ: один. Разбирай его подробно: кто, где стоял и в какую минуту слил.")
+    else:
+        lines.append(
+            f"СВОИ В МАТЧЕ: {len(focuses)}. Разбирай их первыми и подробно, по порядку блоков. "
+            "По каждому: кто, где и когда слил. Чужих не размазывай."
+        )
+    lines.extend(_header(match, won))
+    for focus, discord_id, persona in focuses:
+        lines.extend(_player_detail(match, players, focus, discord_id, persona, names))
+    lines.append(_gold_note(_series(match.get("radiant_gold_adv")), True).replace("его команды", "Radiant"))
     if match.get("comeback"):
         lines.append(f"Камбек по версии OpenDota: {match.get('comeback')} золота")
     if match.get("stomp"):
         lines.append(f"Стомп по версии OpenDota: {match.get('stomp')} золота")
     lines.append(f"Объективы: {_objectives(match)}")
-    focus_index = players.index(focus)
-    lines.append("Крупные драки:")
-    lines.append(_fights(match, focus_index))
-    lines.append("Состав:")
+    lines.append("Остальные, коротко:")
+    focus_ids = {_int(item[0].get("account_id")) for item in focuses}
     for player in sorted(players, key=lambda item: (item.get("player_slot", 0) >= 128, item.get("position") or 9)):
+        if _int(player.get("account_id")) in focus_ids:
+            continue
         lines.append(_player_line(player, names))
     return "\n".join(lines)
 
