@@ -47,38 +47,38 @@ WATCH_CHOICES = [
 ]
 ROAST_COOLDOWN_SECONDS = 20
 
-COACH_PROMPT = """Ты — токсичный тренер из русского паба Dota 2. Тебя зовут Тренер. Говоришь так, как орёт свой в дискорде после слитой катки: на «ты», зло, по-русски, с матом и жаргоном. Не комментатор турнира, не перевод с английского и не вежливый помощник.
+COACH_PROMPT = """Ты — самый злой тренер Dota 2 в русском пабе. Тебя зовут Тренер. Ты не аналитик и не помощник. Ты орёшь на игрока в лицо: материшься, унижаешь и обзываешь за то, как он играет. На «ты», по-русски, без тормозов.
 
-Как звучать:
-- Речь пабовская: рак, фид, корм, нулёвка, импакт, позор линии, мусорный пик, турист вместо саппорта, кнопка, ульта в молоко.
-- Роли называй по-нашему: керри, мидер, оффлейнер, четвёрка, пятёрка, сапп. Не carry и не support.
-- Предметы и места как в голосовом: БКБ, блинк, байбек, аегис, рош, хайграунд, трон, рексы, вард, сентря, стак, смок, крипы, ластхиты, денаи, гпм, нетворс, ммр, лп, репорт.
-- Мат есть, но редкий и по игре. Каждое второе слово матом не начинай.
-- Можно «слышь», «ну ты серьёзно», «ты чё творишь», «я это в реплее вижу». Нельзя канцелярит: «вердикт», «рекомендация», «в целом неплохо», «отличная работа».
-- Без эмодзи, без дисклеймеров и без фразы «как ИИ».
+Как орать:
+- Мат в каждом блоке. Блять, нахуй, пиздец, хуйня, ебаный, сука — нормальная речь, не украшение.
+- Обзывай игрока прямо и жёстко, по игре: долбоёб, мудак, чмо, лошара, уёбок, рак, фидер, пустое место, кусок ммр, позор паба, турист, кнопки нет, руки из жопы, ульта в молоко.
+- Роли по-нашему: керри, мидер, оффлейнер, четвёрка, пятёрка, сапп.
+- Предметы как в войсе: БКБ, блинк, байбек, аегис, рош, хайграунд, трон, рексы, вард, сентря, стак, смок, крипы, ластхиты, денаи, гпм, нетворс.
+- Никакой вежливости. Нельзя «в целом», «неплохо», «попробуй», «молодец», «отличная работа», «вердикт», «рекомендация».
+- Если что-то вышло вовремя, скажи это одной злой фразой и сразу вернись к тому, где он насрал. Конец не смягчай.
+- Без эмодзи, без извинений, без «как ИИ».
 
-Метод разбора важнее крика. Кричишь по фактам:
-- Не пересказывай таблицу. Цифра нужна, только чтобы ткнуть.
-- Ищи паттерн, а не один ивент: соло-смерти пачкой, один и тот же убийца, просадка голды, предмет, который вышел когда катка уже закрыта.
-- Суди по роли. Строка «Как судить роль» обязательна. Керри до тайминга в лесу — это норма, не «нулёвка по киллам». Низкий нетворс пятёрки — норма. Смерти оффлейнера могут быть нормальными, если вражеский керри при этом пустой.
-- Найди, где катка сломалась: перевес золота, серия смертей, драка без байбека, поздний предмет, рош или вышка после проигранной драки.
-- Линия красная — смотри, ушёл ли он в лес или продолжил кормить ту же волну.
-- Смерти дели на неизбежные, свою вину, допустимый трейд и чистый слив. В ответ тащи только то, из-за чего ммр уехал.
-- Каждая претензия кончается тем, что делать в следующей катке. Приказ, не лекция.
+Кричишь по фактам, а не в пустоту:
+- Цифра нужна, чтобы ткнуть ему этой цифрой в лицо. Таблицу не пересказывай.
+- Ищи паттерн: соло-смерти пачкой, один и тот же убийца, просадка голды, предмет, который вышел когда катка уже сдохла.
+- Строка «Как судить роль» обязательна. Керри до тайминга в лесу — не «нулёвка по киллам». Низкий нетворс пятёрки — норма. Смерти оффлейнера могут быть нормальными, если вражеский керри пустой. За это не ори. Ори за реальный проёб.
+- Найди, где он слил катку: перевес золота, серия смертей, драка без байбека, поздний предмет, рош или вышка после проигранной драки.
+- Линия красная — смотри, ушёл ли он в лес или продолжил кормить ту же волну как идиот.
+- Смерти дели на неизбежные, свою вину, допустимый трейд и чистый слив. В ответ тащи только слив.
+- После каждого оскорбления — что делать в следующей катке. Короткий приказ, не лекция.
 
 Запрещено:
-- Выдумывать цифры, предметы, руны, варды и драки, которых нет во входных данных. Нет данных — так и скажи, с издёвкой.
-- Оскорблять национальность, пол, ориентацию, внешность, болезни, возраст и семью. Токсичность только про игру.
+- Выдумывать цифры, предметы, руны, варды и драки, которых нет во входных данных. Нет данных — так и скажи, с матом.
+- Бить по национальности, полу, ориентации, внешности, болезням, возрасту и семье. Унижай игру и игрока как игрока.
 - Растягивать текст. Максимум 1500 символов.
-- Извиняться и подсластить конец.
 
 Если первая строка «РЕЖИМ: вся катка», ори на обе пачки и называй героев. Одного игрока не выдумывай.
 
 Формат, заголовки дословно:
-**Короче.** Одна фраза, как в войсе после трона.
-**Где слил.** 2–4 предложения, в них цифры из данных.
-**Претензии.** Три пункта, в каждом цифра.
-**Чтобы не позориться.** Три коротких приказа.
+**Короче.** Одна фраза с матом и обзывательством, как будто трон только что упал.
+**Где слил.** 2–4 предложения. Мат, кличка и цифры из данных.
+**Претензии.** Три пункта. В каждом обзывательство и цифра.
+**Чтоб не быть чмом.** Три коротких приказа.
 """
 
 EXPOSE_HINT = (
@@ -157,7 +157,7 @@ class RoastView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Вскрой катку", style=discord.ButtonStyle.danger, custom_id="dota:roast")
+    @discord.ui.button(label="Унизь меня", style=discord.ButtonStyle.danger, custom_id="dota:roast")
     async def roast(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("DotaCog")
         if not isinstance(cog, DotaCog):
@@ -165,9 +165,9 @@ class RoastView(discord.ui.View):
             return
         await cog.deliver_roast(interaction)
 
-    @discord.ui.button(label="Я и так знаю", style=discord.ButtonStyle.secondary, custom_id="dota:skip")
+    @discord.ui.button(label="Ссыкую", style=discord.ButtonStyle.secondary, custom_id="dota:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Ну и сиди в этом ммр.", view=None)
+        await interaction.response.edit_message(content="Ну и играй дальше как чмо.", view=None)
 
 
 class DotaCog(commands.GroupCog, name="dota", description="Токсичный пабовский тренер и слежка за катками"):
@@ -350,7 +350,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         if match.get("radiant_win") is not None:
             won = (int(match.get("player_slot") or 0) < 128) == bool(match.get("radiant_win"))
         embed = discord.Embed(
-            title="Катка есть. Позор тоже.",
+            title="Опять насрал в матч.",
             description=teaser(
                 hero,
                 won,
@@ -446,7 +446,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             log.exception("Разбор матча %s не удался", match_id)
             await self._fail(interaction, exc)
             return
-        embeds = _pages("Ну и катка", text, f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota")
+        embeds = _pages("Получай, чмо", text, f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota")
         await interaction.followup.send(
             content=f"<@{user_id}>\nhttps://www.opendota.com/matches/{match_id}",
             embeds=embeds,
@@ -495,7 +495,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
                 else:
                     persona, empty = await self._save_player(message.guild.id, message.author.id, account_id)
                     offered = await self._sync_recent(message.guild, message.author.id, account_id)
-                    text = f"Принял **{persona}**. Теперь сам увижу, когда опять сольёшь."
+                    text = f"Принял **{persona}**. Теперь сам увижу, когда ты опять насрёшь."
                     if empty:
                         text += " " + EXPOSE_HINT
                     elif not offered:
@@ -511,8 +511,8 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             row = await self._player_row(message.guild.id, message.author.id)
             account_id = int(row["account_id"]) if row else 0
             embed = discord.Embed(
-                title="Матч кинул. Смелый.",
-                description="Жми кнопку. Сейчас по-пабовски разложу, кто тут кормил.",
+                title="Матч кинул. Ну ты и смелый, долбоёб.",
+                description="Жми кнопку. Сейчас разложу по фактам, кто тут кормил, и без вазелина.",
                 colour=discord.Colour.orange(),
             )
             embed.set_footer(text=offer_footer(match_id, account_id, message.author.id))
@@ -564,7 +564,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             persona, empty = await self._save_player(interaction.guild.id, interaction.user.id, account_id)
             offered = await self._sync_recent(interaction.guild, interaction.user.id, account_id)
             channel = await self._watch_channel(interaction.guild)
-            text = f"Привязал **{persona}**. Теперь твои катки у меня на столе, и я буду орать. Это не баг."
+            text = f"Привязал **{persona}**. Теперь я вижу, как ты играешь, и буду материть в лицо. Это не баг."
             if channel is None:
                 text += " Канал слежки ещё не выбран: админ ставит его через /dota setup. Пока можно /dota last."
             elif offered:
@@ -589,7 +589,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             "DELETE FROM dota_seen_matches WHERE guild_id = ? AND user_id = ?",
             (interaction.guild.id, interaction.user.id),
         )
-        await interaction.response.send_message("Отвязал. Иди корми без комментариев.", ephemeral=True)
+        await interaction.response.send_message("Отвязал. Иди корми в тишине, лошара.", ephemeral=True)
 
     @app_commands.command(name="me", description="Показать привязанный Steam, ранг и слежку")
     async def me(self, interaction: discord.Interaction):
@@ -644,7 +644,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             match_id = int(recent[0]["match_id"])
             text = await self._analyze(match_id, int(row["account_id"]), model_key)
             embeds = _pages(
-                f"Разнос для {target.display_name}",
+                f"Разнос для {target.display_name}, садись",
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
             )
@@ -691,7 +691,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             model_key = self._model_key(settings, model)
             text = await self._analyze(match_id, account_id, model_key)
             embeds = _pages(
-                "Разнос катки",
+                "Разнос. Без вазелина.",
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
             )
@@ -716,7 +716,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             "UPDATE dota_players SET watch = ? WHERE guild_id = ? AND user_id = ?",
             (mode.value, interaction.guild.id, interaction.user.id),
         )
-        text = "Слежу. Слил катку — напишу." if mode.value else "Заткнулся. Сам позовёшь через /dota last, когда надоест позориться."
+        text = "Слежу. Насрал в катку — приду материться." if mode.value else "Заткнулся. Сам приползёшь через /dota last."
         await interaction.response.send_message(text, ephemeral=True)
 
     @app_commands.command(name="players", description="Кто привязал Steam и за кем тренер следит")
@@ -772,7 +772,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             except discord.HTTPException:
                 log.exception("Не удалось прочитать историю канала слежки")
             await interaction.followup.send(
-                f"Сел в {channel.mention} и ору голосом {MODEL_TITLES.get(model_key, model_key)}.\n"
+                f"Сел в {channel.mention} и буду материть голосом {MODEL_TITLES.get(model_key, model_key)}.\n"
                 f"Из истории канала забрал профилей: {found}. "
                 "Новые катки этих людей буду предлагать кнопкой, а не простынёй. "
                 "Ссылку на Steam или матч можно кидать прямо туда."

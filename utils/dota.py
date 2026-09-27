@@ -608,7 +608,7 @@ def teaser(hero: str, won: bool | None, duration, kills, deaths, assists, lobby_
         f"**{hero}** · {result} · {fmt_duration(duration)} · "
         f"**{_int(kills)}/{_int(deaths)}/{_int(assists)}**\n"
         f"{lobby_name(lobby_type)} · {mode_name(game_mode)}{extra}\n"
-        "Жми кнопку, если готов, чтобы тебе по-пабовски объяснили, где ты кормил."
+        "Жми кнопку, если готов, чтобы тебе в лицо сказали, какой ты мусор в этой катке."
     )
 
 
