@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import sqlite3
 import time
@@ -17,8 +16,12 @@ from utils.dota import (
     OpenDota,
     OpenDotaError,
     PlayerNotInMatch,
+    _int,
     build_brief,
     find_match_id,
+    fmt_duration,
+    lobby_name,
+    mode_name,
     offer_footer,
     parse_account_argument,
     parse_match_argument,
@@ -27,6 +30,7 @@ from utils.dota import (
     rank_name,
     teaser,
 )
+from utils.nordrouter import assistant_text, chat_complete, choice_message
 from utils.settings import get_settings
 
 log = logging.getLogger("cogs.dota")
@@ -62,6 +66,8 @@ COACH_PROMPT = """Ты — самый злой тренер Dota 2 в русск
 - Цифра нужна, чтобы ткнуть ему этой цифрой в лицо. Таблицу не пересказывай.
 - Ищи паттерн: соло-смерти пачкой, один и тот же убийца, просадка голды, предмет, который вышел когда катка уже сдохла.
 - Строка «Как судить роль» обязательна. Керри до тайминга в лесу — не «нулёвка по киллам». Низкий нетворс пятёрки — норма. Смерти оффлейнера могут быть нормальными, если вражеский керри пустой. За это не ори. Ори за реальный проёб.
+- Позиция в строке «поз N» уже посчитана. Не переименовывай керри в четвёрку и мидера в пятёрку. Если написано «оценка по фарму» или «линия не разобрана», не утверждай, что он стоял на сейфе, миде или оффе.
+- Строки «Варды поставлены», «Стаки» и «Урон по башням» — факты. Если там число, ткни этим числом. Саппорт с нулём вардов и четвёрка с нулём стаков — это слив. Керри с нулём урона по башням, когда катка дошла до вышек, — тоже. Если написано «реплей не разобран» или «нет в данных», этих цифр нет: не выдумывай варды, стаки и линии.
 - Найди, где он слил катку: перевес золота, серия смертей, драка без байбека, поздний предмет, рош или вышка после проигранной драки.
 - Линия красная — смотри, ушёл ли он в лес или продолжил кормить ту же волну как идиот.
 - Смерти дели на неизбежные, свою вину, допустимый трейд и чистый слив. В ответ тащи только слив.
@@ -113,21 +119,6 @@ def _public_error(exc: Exception) -> str:
     if isinstance(exc, RuntimeError):
         return str(exc)
     return "Что-то сломалось. Подробности в логе бота."
-
-
-def _message_text(message: dict) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict) and part.get("type") in (None, "text", "output_text"):
-                parts.append(str(part.get("text") or ""))
-        return "".join(parts).strip()
-    return ""
 
 
 def _split(text: str, limit: int = 1800) -> list[str]:
@@ -205,7 +196,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         self._sync_lock = asyncio.Lock()
 
     async def cog_load(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300))
         self.api = OpenDota(self.session, config.OPENDOTA_API_KEY)
         self.bot.add_view(RoastView())
         try:
@@ -330,65 +321,125 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         self._last_roast[user_id] = now
         return False
 
-    async def _sync_recent(self, guild: discord.Guild, user_id: int, account_id: int) -> bool:
-        """Помечает старые катки просмотренными и предлагает одну свежую. True, если сообщение ушло."""
-        async with self._sync_lock:
-            return await self._sync_recent_unlocked(guild, user_id, account_id)
+    async def _sync_recent(self, guild: discord.Guild, user_id: int, _account_id: int) -> bool:
+        """Помечает старые катки и предлагает свежие. Одно сообщение на команду в матче."""
+        return await self._sync_guild(guild, focus_user_id=user_id)
 
-    async def _sync_recent_unlocked(self, guild: discord.Guild, user_id: int, account_id: int) -> bool:
+    async def _sync_guild(self, guild: discord.Guild, focus_user_id: int | None = None) -> bool:
+        async with self._sync_lock:
+            return await self._sync_guild_unlocked(guild, focus_user_id)
+
+    async def _sync_guild_unlocked(self, guild: discord.Guild, focus_user_id: int | None) -> bool:
         channel = await self._watch_channel(guild)
         if channel is None:
             return False
-        recent = await self._api().recent_matches(account_id)
-        seen_rows = await self.bot.db.fetchall(
-            "SELECT match_id FROM dota_seen_matches WHERE guild_id = ? AND user_id = ?",
-            (guild.id, user_id),
+        rows = await self.bot.db.fetchall(
+            "SELECT user_id, account_id FROM dota_players WHERE guild_id = ? AND watch = 1",
+            (guild.id,),
         )
-        seen = {row["match_id"] for row in seen_rows}
-        unseen = [match for match in recent if match.get("match_id") and match["match_id"] not in seen]
-        offer = None
-        if channel is not None and unseen:
-            newest = unseen[0]
-            start = int(newest.get("start_time") or 0)
-            if start and time.time() - start <= OFFER_WINDOW_SECONDS:
-                offer = newest
-        for match in recent:
-            match_id = match.get("match_id")
-            if match_id and (offer is None or match_id != offer.get("match_id")):
+        buckets: dict[tuple[int, int], list[tuple[int, int, dict]]] = {}
+        for row in rows:
+            user_id = int(row["user_id"])
+            account_id = int(row["account_id"])
+            try:
+                recent = await self._api().recent_matches(account_id)
+            except Exception:
+                log.exception("Не удалось прочитать катки игрока %s", user_id)
+                await asyncio.sleep(0.5)
+                continue
+            seen_rows = await self.bot.db.fetchall(
+                "SELECT match_id FROM dota_seen_matches WHERE guild_id = ? AND user_id = ?",
+                (guild.id, user_id),
+            )
+            seen = {item["match_id"] for item in seen_rows}
+            offer = None
+            for match in recent:
+                match_id = match.get("match_id")
+                if not match_id or int(match_id) in seen:
+                    continue
+                start = int(match.get("start_time") or 0)
+                fresh = bool(start and time.time() - start <= OFFER_WINDOW_SECONDS)
+                if offer is None and fresh:
+                    offer = match
+                    continue
                 await self._mark_seen(guild.id, user_id, int(match_id))
-        if offer is None or channel is None:
-            return False
-        try:
-            await self._send_offer(channel, user_id, account_id, offer)
-        except discord.HTTPException:
-            log.exception("Не удалось предложить разбор матча %s", offer.get("match_id"))
-            return False
-        await self._mark_seen(guild.id, user_id, int(offer["match_id"]))
-        return True
+            if offer is not None:
+                slot = offer.get("player_slot")
+                side = user_id if slot is None else (0 if int(slot) < 128 else 1)
+                buckets.setdefault((int(offer["match_id"]), side), []).append((user_id, account_id, offer))
+            await asyncio.sleep(0.4)
 
-    async def _send_offer(self, channel: discord.TextChannel, user_id: int, account_id: int, match: dict):
+        focused = False
+        for (match_id, _side), people in buckets.items():
+            unique: list[tuple[int, int, dict]] = []
+            seen_users: set[int] = set()
+            for person in people:
+                if person[0] in seen_users:
+                    continue
+                seen_users.add(person[0])
+                unique.append(person)
+            try:
+                await self._send_offer(channel, unique)
+            except discord.HTTPException:
+                log.exception("Не удалось предложить разбор матча %s", match_id)
+                continue
+            for user_id, _account_id, _match in unique:
+                await self._mark_seen(guild.id, user_id, match_id)
+                if focus_user_id and user_id == focus_user_id:
+                    focused = True
+        return focused
+
+    async def _send_offer(self, channel: discord.TextChannel, people: list[tuple[int, int, dict]]):
         await self._ensure_names()
-        hero = self._api().names.hero(match.get("hero_id"))
+        names = self._api().names
+        user_id, account_id, match = people[0]
+        if len(people) == 1:
+            hero = names.hero(match.get("hero_id"))
+            won = None
+            if match.get("radiant_win") is not None:
+                won = (int(match.get("player_slot") or 0) < 128) == bool(match.get("radiant_win"))
+            embed = discord.Embed(
+                title="Опять насрал в матч.",
+                description=teaser(
+                    hero,
+                    won,
+                    match.get("duration"),
+                    match.get("kills"),
+                    match.get("deaths"),
+                    match.get("assists"),
+                    match.get("lobby_type"),
+                    match.get("game_mode"),
+                    match.get("leaver_status"),
+                ),
+                colour=discord.Colour.orange(),
+            )
+            embed.set_footer(text=offer_footer(int(match["match_id"]), account_id, user_id))
+            await channel.send(content=f"<@{user_id}>", embed=embed, view=RoastView())
+            return
         won = None
-        if match.get("radiant_win") is not None:
+        if match.get("radiant_win") is not None and match.get("player_slot") is not None:
             won = (int(match.get("player_slot") or 0) < 128) == bool(match.get("radiant_win"))
+        result = {True: "победа", False: "поражение", None: "катка"}[won]
+        lines = []
+        for uid, _account, summary in people:
+            hero = names.hero(summary.get("hero_id"))
+            lines.append(
+                f"<@{uid}> — **{hero}** "
+                f"**{_int(summary.get('kills'))}/{_int(summary.get('deaths'))}/{_int(summary.get('assists'))}**"
+            )
         embed = discord.Embed(
-            title="Опять насрал в матч.",
-            description=teaser(
-                hero,
-                won,
-                match.get("duration"),
-                match.get("kills"),
-                match.get("deaths"),
-                match.get("assists"),
-                match.get("lobby_type"),
-                match.get("game_mode"),
-                match.get("leaver_status"),
+            title="Опять насрали в матч.",
+            description=(
+                f"{result} · {fmt_duration(match.get('duration'))} · "
+                f"{lobby_name(match.get('lobby_type'))} · {mode_name(match.get('game_mode'))}\n"
+                + "\n".join(lines)
+                + "\nЖми кнопку. Разбор будет один, на всю вашу команду."
             ),
             colour=discord.Colour.orange(),
         )
         embed.set_footer(text=offer_footer(int(match["match_id"]), account_id, user_id))
-        await channel.send(content=f"<@{user_id}>", embed=embed, view=RoastView())
+        mentions = " ".join(f"<@{uid}>" for uid, _account, _summary in people)
+        await channel.send(content=mentions, embed=embed, view=RoastView())
 
     async def _guild_links(self, guild_id: int) -> list[tuple[int, int, str]]:
         rows = await self.bot.db.fetchall(
@@ -402,36 +453,26 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             raise DotaUserError("NORDROUTER_API_KEY не настроен, тренеру нечем думать.")
         if self.session is None:
             raise DotaUserError("Тренер ещё поднимается. Повтори через пару секунд.")
-        payload = {
-            "model": _model_id(model_key),
-            "messages": [
+        limit = 4000 if brief.count("=== ПОДРОБНО") > 1 else 3200
+        data = await chat_complete(
+            self.session,
+            config.NORDROUTER_API_KEY,
+            config.NORDROUTER_BASE_URL,
+            model=_model_id(model_key),
+            messages=[
                 {"role": "system", "content": COACH_PROMPT},
-                {"role": "user", "content": "Разбери катку по этим данным. Своих из блоков ПОДРОБНО — первыми, кто где и когда слил.\n\n" + brief[:14000]},
+                {
+                    "role": "user",
+                    "content": (
+                        "Разбери катку по этим данным. Своих из блоков ПОДРОБНО — первыми, "
+                        "кто где и когда слил. Варды, стаки и урон по башням бери только из строк с этими словами.\n\n"
+                        + brief[:28000]
+                    ),
+                },
             ],
-            "max_tokens": 2400 if brief.count("=== ПОДРОБНО") > 1 else 1600,
-        }
-        headers = {
-            "Authorization": f"Bearer {config.NORDROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        url = f"{config.NORDROUTER_BASE_URL}/chat/completions"
-        async with self.session.post(url, headers=headers, json=payload) as resp:
-            raw = await resp.read()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                snippet = raw.decode("utf-8", errors="replace").strip()[:300]
-                raise RuntimeError(snippet or f"NordRouter ответил {resp.status}.")
-            if resp.status != 200:
-                error = data.get("error") if isinstance(data, dict) else None
-                if isinstance(error, dict) and error.get("message"):
-                    raise RuntimeError(str(error["message"]))
-                if isinstance(error, str) and error:
-                    raise RuntimeError(error)
-                raise RuntimeError(f"NordRouter ответил {resp.status}.")
-        choices = data.get("choices") or []
-        message = (choices[0].get("message") if choices else None) or {}
-        answer = _message_text(message)
+            max_tokens=limit,
+        )
+        answer = assistant_text(choice_message(data))
         if not answer:
             raise DotaUserError("Модель промолчала. Даже ей стыдно за эту катку.")
         return answer
@@ -440,14 +481,15 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         await self._ensure_names()
         linked = await self._guild_links(guild_id)
         try:
-            match = await self._api().match(match_id)
+            match = await self._api().load_match(match_id)
+        except MatchNotReady as exc:
+            raise DotaUserError(str(exc)) from exc
         except OpenDotaError as exc:
             raise DotaUserError(_public_error(exc)) from exc
         names = self._api().names
         try:
             brief = build_brief(match, account_id, names, linked)
         except MatchNotReady as exc:
-            await self._api().request_parse(match_id)
             raise DotaUserError(str(exc)) from exc
         except PlayerNotInMatch:
             brief = (
@@ -493,7 +535,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
     async def watch_matches(self):
         try:
             rows = await self.bot.db.fetchall(
-                "SELECT guild_id, user_id, account_id FROM dota_players WHERE watch = 1"
+                "SELECT DISTINCT guild_id FROM dota_players WHERE watch = 1"
             )
         except Exception:
             log.exception("Не удалось прочитать список игроков Доты")
@@ -503,9 +545,9 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             if guild is None:
                 continue
             try:
-                await self._sync_recent(guild, row["user_id"], row["account_id"])
+                await self._sync_guild(guild)
             except Exception:
-                log.exception("Слежка за игроком %s не удалась", row["user_id"])
+                log.exception("Слежка на сервере %s не удалась", row["guild_id"])
             await asyncio.sleep(1)
 
     @watch_matches.before_loop

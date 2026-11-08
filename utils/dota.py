@@ -6,6 +6,7 @@ OpenDota уже парсит реплей, и именно его match API ис
 """
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -303,43 +304,146 @@ def _pct(value) -> str:
     return f"{number:.0f}%"
 
 
+def _lane_role(player: dict) -> int | None:
+    raw = player.get("lane_role")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_est(player: dict) -> int | None:
+    raw = player.get("position_est")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 1 <= value <= 5 else None
+
+
+def _stamp_position(player: dict, position: int, source: str):
+    player["position"] = position
+    player["role"] = "core" if position <= 3 else "support"
+    player["position_source"] = source
+
+
+def _assign_by_farm(team: list[dict]):
+    """Без линий: самый фармящий — 1, самый пустой — 5. Не сваливать всех в 4–5."""
+    ordered = sorted(
+        team,
+        key=lambda player: (
+            _int(player.get("last_hits")),
+            _int(player.get("gold_per_min")),
+            _int(player.get("net_worth")),
+        ),
+        reverse=True,
+    )
+    for index, player in enumerate(ordered):
+        _stamp_position(player, index + 1 if index < 4 else 5, "farm")
+
+
+def _early_wards(player: dict) -> int:
+    count = 0
+    for entry in player.get("purchase_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("key") in ("ward_observer", "ward_sentry") and _int(entry.get("time"), 10**9) <= 12 * 60:
+            count += 1
+    return count
+
+
+def _assign_wanted(group: list[dict], wanted: list[int], prefer):
+    taken: set[int] = set()
+    pending: list[dict] = []
+    for player in group:
+        want = prefer(player)
+        if want in wanted and want not in taken:
+            player["position"] = want
+            taken.add(want)
+        else:
+            pending.append(player)
+    remaining = [item for item in wanted if item not in taken]
+    for player, position in zip(pending, remaining):
+        player["position"] = position
+
+
+def _estimate_from_timeline(team: list[dict]) -> bool:
+    """Та же оценка, что OpenDota position_est: фарм на 10–12 мин, потом линия.
+
+    Верхние трое по фарму — коры 1/2/3, нижние двое — 5 на сейфе и 4 на остальных.
+    Если линия неизвестна или у всех лес, номера всё равно разбираются по фарму,
+    а не превращаются в сплошные 4–5.
+    """
+    if len(team) != 5:
+        return False
+    scored = []
+    for player in team:
+        gold = _series(player.get("gold_t"))
+        last_hits = _series(player.get("lh_t"))
+        if len(gold) <= 12 or len(last_hits) <= 12:
+            return False
+        scored.append({
+            "player": player,
+            "gold": (gold[10] + gold[11] + gold[12]) / 3,
+            "lh": (last_hits[10] + last_hits[11] + last_hits[12]) / 3,
+            "wards": _early_wards(player),
+        })
+    for key in ("gold", "lh"):
+        ordered = sorted(scored, key=lambda item: item[key], reverse=True)
+        for index, item in enumerate(ordered):
+            item[f"rank_{key}"] = index
+    for item in scored:
+        item["farm"] = item["rank_gold"] + item["rank_lh"]
+    scored.sort(key=lambda item: (item["farm"], item["wards"]))
+    ordered_players = [item["player"] for item in scored]
+
+    def core_lane(player: dict):
+        lane = _lane_role(player)
+        return lane if lane in (1, 2, 3) else None
+
+    def support_lane(player: dict):
+        lane = _lane_role(player)
+        if lane in (2, 3):
+            return 4
+        if lane == 1:
+            return 5
+        return None
+
+    _assign_wanted(ordered_players[:3], [1, 2, 3], core_lane)
+    _assign_wanted(ordered_players[3:], [4, 5], support_lane)
+    for player in ordered_players:
+        position = player.get("position")
+        if position in (1, 2, 3, 4, 5):
+            _stamp_position(player, int(position), "parsed")
+    return all(player.get("position") in (1, 2, 3, 4, 5) for player in ordered_players)
+
+
+def _apply_opendota_estimates(team: list[dict]) -> bool:
+    estimates = [_position_est(player) for player in team]
+    if len(team) != 5 or any(item is None for item in estimates):
+        return False
+    if len(set(estimates)) != 5:
+        return False
+    for player, position in zip(team, estimates):
+        _stamp_position(player, int(position), "opendota")
+    return True
+
+
 def assign_positions(players: list[dict]) -> list[dict]:
-    """Позиции 1–5 по линии и GPM, как в mcp-replay-dota2."""
-    radiant = [player for player in players if player.get("player_slot", 0) < 128]
-    dire = [player for player in players if player.get("player_slot", 0) >= 128]
+    """Позиции 1–5. Сначала оценка OpenDota, потом фарм на 10–12 мин, иначе итог катки."""
+    radiant = [player for player in players if _int(player.get("player_slot")) < 128]
+    dire = [player for player in players if _int(player.get("player_slot")) >= 128]
 
     def process(team: list[dict]):
-        lanes: dict[int, list[dict]] = {}
-        unassigned: list[dict] = []
-        for player in team:
-            lane_role = player.get("lane_role")
-            lanes.setdefault(lane_role, []).append(player)
-        for lane_role, lane_players in lanes.items():
-            ordered = sorted(lane_players, key=lambda item: _int(item.get("gold_per_min")), reverse=True)
-            if lane_role == 2:
-                for player in ordered:
-                    player["position"] = 2
-                    player["role"] = "core"
-            elif lane_role == 1 and ordered:
-                ordered[0]["position"] = 1
-                ordered[0]["role"] = "core"
-                for player in ordered[1:]:
-                    player["position"] = 5
-                    player["role"] = "support"
-            elif lane_role == 3 and ordered:
-                ordered[0]["position"] = 3
-                ordered[0]["role"] = "core"
-                for player in ordered[1:]:
-                    player["position"] = 4
-                    player["role"] = "support"
-            else:
-                for player in ordered:
-                    player["role"] = "support"
-                    unassigned.append(player)
-        unassigned.sort(key=lambda item: _int(item.get("gold_per_min")), reverse=True)
-        for index, player in enumerate(unassigned):
-            if player.get("position") is None:
-                player["position"] = 4 if index == 0 else 5
+        if not team:
+            return
+        if _apply_opendota_estimates(team):
+            return
+        if _estimate_from_timeline(team):
+            return
+        _assign_by_farm(team)
 
     process(radiant)
     process(dire)
@@ -476,10 +580,21 @@ def _player_line(player: dict, names: Names) -> str:
     name = player.get("personaname") or player.get("name") or "аноним"
     lh10 = _at(_series(player.get("lh_t")), 10)
     lh10_text = f", LH10 {lh10}" if lh10 is not None else ""
+    extra = []
+    tower = _present_int(player, "tower_damage", "scaled_tower_damage")
+    obs, _sen = _ward_counts(player)
+    camps = _present_int(player, "camps_stacked")
+    if tower is not None:
+        extra.append(f"башни {tower}")
+    if obs is not None:
+        extra.append(f"варды {obs}")
+    if camps is not None:
+        extra.append(f"стаки {camps}")
+    tail = f" {' '.join(extra)}" if extra else ""
     return (
         f"{side} {pos} {names.hero(player.get('hero_id'))} ({name}) "
         f"{_int(player.get('kills'))}/{_int(player.get('deaths'))}/{_int(player.get('assists'))} "
-        f"GPM {_int(player.get('gold_per_min'))} NW {_int(player.get('net_worth'))}{lh10_text}"
+        f"GPM {_int(player.get('gold_per_min'))} NW {_int(player.get('net_worth'))}{lh10_text}{tail}"
     )
 
 
@@ -497,31 +612,67 @@ def _header(match: dict, won: bool | None, result_label: str | None = None) -> l
 
 
 def _lane_label(player: dict) -> str:
-    lanes = {1: "сейф", 2: "мид", 3: "офф", 4: "лес"}
-    lane = lanes.get(_int(player.get("lane_role")), "линия неясна")
+    roles = {1: "сейф", 2: "мид", 3: "офф", 4: "лес"}
+    sides = {1: "бот", 2: "мид", 3: "топ"}
+    parts = []
+    role = _lane_role(player)
+    if role in roles:
+        parts.append(roles[role])
+    try:
+        lane_no = int(player["lane"]) if player.get("lane") is not None else None
+    except (TypeError, ValueError, KeyError):
+        lane_no = None
+    if lane_no in sides and sides[lane_no] not in parts:
+        parts.append(sides[lane_no])
+    text = ", ".join(parts) if parts else "линия не разобрана"
     if player.get("is_roaming"):
-        lane += ", роум"
-    return lane
+        text += ", роум"
+    return text
 
 
 def _coords_label(key) -> str:
     if isinstance(key, (list, tuple)) and len(key) >= 2:
         nums = list(key[:2])
     else:
-        found = re.findall(r"-?\d+", str(key or ""))
+        found = re.findall(r"-?\d+(?:\.\d+)?", str(key or ""))
         if len(found) < 2:
             return ""
         nums = found[:2]
     try:
-        x, y = int(nums[0]), int(nums[1])
+        x, y = int(float(nums[0])), int(float(nums[1]))
     except (TypeError, ValueError):
         return ""
     wide = abs(x) > 1000 or abs(y) > 1000
-    left, right = (-2000, 2000) if wide else (40, 88)
-    low, high = (-2000, 2000) if wide else (40, 88)
-    horiz = "лево" if x < left else "право" if x > right else "центр"
-    vert = "низ" if y < low else "верх" if y > high else "середина"
+    if wide:
+        horiz = "лево" if x < -2000 else "право" if x > 2000 else "центр"
+        vert = "низ" if y < -2000 else "верх" if y > 2000 else "середина"
+    else:
+        # Клетка вард-лога OpenDota: центр карты около 128, не 64.
+        horiz = "лево" if x < 110 else "право" if x > 146 else "центр"
+        vert = "низ" if y < 110 else "верх" if y > 146 else "середина"
     return f"{vert}-{horiz}"
+
+
+def _present_int(player: dict, *keys: str) -> int | None:
+    for key in keys:
+        if player.get(key) is not None:
+            return _int(player.get(key))
+    return None
+
+
+def _ward_counts(player: dict) -> tuple[int | None, int | None]:
+    obs = _present_int(player, "obs_placed", "observers_placed", "purchase_ward_observer")
+    sen = _present_int(player, "sen_placed", "purchase_ward_sentry")
+    if obs is None and isinstance(player.get("obs_log"), list):
+        obs = len(player["obs_log"])
+    if sen is None and isinstance(player.get("sen_log"), list):
+        sen = len(player["sen_log"])
+    purchase = player.get("purchase") if isinstance(player.get("purchase"), dict) else {}
+    if obs is None and purchase.get("ward_observer") is not None:
+        obs = _int(purchase.get("ward_observer"))
+    if sen is None and purchase.get("ward_sentry") is not None:
+        sen = _int(purchase.get("ward_sentry"))
+    return obs, sen
 
 
 def _ward_spots(player: dict) -> str:
@@ -530,12 +681,70 @@ def _ward_spots(player: dict) -> str:
         for entry in player.get(field) or []:
             if not isinstance(entry, dict):
                 continue
-            place = _coords_label(entry.get("key") or entry.get("position"))
+            place = _coords_label(
+                entry.get("key")
+                or entry.get("position")
+                or [entry.get("x"), entry.get("y")]
+            )
             spot = f" {place}" if place else ""
             bits.append(f"{label} {fmt_game_time(entry.get('time'))}{spot}")
-            if len(bits) >= 6:
+            if len(bits) >= 8:
                 return ", ".join(bits)
-    return ", ".join(bits) if bits else "точек вардов в логе нет"
+    return ", ".join(bits) if bits else "координат в логе нет"
+
+
+def _vision_lines(player: dict) -> list[str]:
+    """Варды, стаки и урон по башням отдельными строками, чтобы модель их не пропускала."""
+    obs, sen = _ward_counts(player)
+    camps = _present_int(player, "camps_stacked")
+    creeps = _present_int(player, "creeps_stacked")
+    tower = _present_int(player, "tower_damage", "scaled_tower_damage")
+    tower_kills = _present_int(player, "tower_kills", "towers_killed")
+    lines = []
+    if obs is None and sen is None:
+        lines.append("Варды поставлены: реплей не разобран, поставок в данных нет.")
+    else:
+        lines.append(
+            f"Варды поставлены: обсерверы {obs or 0}, сентри {sen or 0}. Где: {_ward_spots(player)}"
+        )
+    if camps is None and creeps is None:
+        lines.append("Стаки: реплей не разобран, стаков в данных нет.")
+    else:
+        lines.append(f"Стаки: кемпов {camps or 0}, крипов в стаках {creeps or 0}.")
+    if tower is None and tower_kills is None:
+        lines.append("Урон по башням: нет в данных.")
+    else:
+        kills = f", башен снесено {tower_kills}" if tower_kills is not None else ""
+        lines.append(f"Урон по башням: {tower or 0}{kills}.")
+    return lines
+
+
+def _parse_job_id(detail: str) -> str | None:
+    try:
+        data = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    job = data.get("job") if isinstance(data.get("job"), dict) else data
+    if not isinstance(job, dict):
+        return None
+    job_id = job.get("jobId") or job.get("id")
+    return str(job_id) if job_id else None
+
+
+def _replay_ready(match: dict) -> bool:
+    return bool(match.get("players")) and match.get("version") is not None
+
+
+def _parse_note(match: dict) -> str | None:
+    if match.get("version") is None:
+        return (
+            "РЕПЛЕЙ НЕ РАЗОБРАН. Линий, координат вардов и стаков нет. "
+            "KDA, GPM, урон по героям и урон по башням, если число указано, можно использовать. "
+            "Позиции в этом случае оценены по фарму, а не по линии."
+        )
+    return None
 
 
 def _farm_marks(player: dict) -> str:
@@ -631,10 +840,13 @@ def _player_detail(
         label = f"{nick} ({persona})"
     if discord_id:
         label += f" <@{discord_id}>"
+    farm_note = ""
+    if focus.get("position_source") == "farm":
+        farm_note = " Оценка по фарму: линии в реплее нет, не выдумывай сейф, мид или офф."
     lines = [
         f"=== ПОДРОБНО: {label} · {names.hero(focus.get('hero_id'))} · "
         f"{'Radiant' if is_radiant else 'Dire'} · поз {position} ({POSITIONS.get(position, '?')}) ===",
-        f"Где стоял: {_lane_label(focus)}.",
+        f"Где стоял: {_lane_label(focus)}.{farm_note}",
     ]
     if position in ROLE_HINTS:
         lines.append(f"Как судить роль: {ROLE_HINTS[position]}")
@@ -644,14 +856,14 @@ def _player_detail(
         f"LH/DN {_int(focus.get('last_hits'))}/{_int(focus.get('denies'))} · "
         f"нетворс {_int(focus.get('net_worth'))} · уровень {_int(focus.get('level'))}"
     )
+    lines.extend(_vision_lines(focus))
     lines.append(
         f"Участие в драках {_pct(focus.get('teamfight_participation'))} · "
-        f"урон по героям {_int(focus.get('hero_damage'))} · урон по башням {_int(focus.get('tower_damage'))} · "
+        f"урон по героям {_int(focus.get('hero_damage'))} · "
         f"лечение {_int(focus.get('hero_healing'))}"
     )
     lines.append(
-        f"Стаки {_int(focus.get('camps_stacked'))} · обсерверы {_int(focus.get('obs_placed'))} · "
-        f"сентри {_int(focus.get('sen_placed'))} · байбеки {_int(focus.get('buyback_count'))} · "
+        f"Байбеки {_int(focus.get('buyback_count'))} · "
         f"станы {_num(focus.get('stuns'), 0)} · APM {_int(focus.get('actions_per_min'))} · "
         f"эффективность линии {_pct(focus.get('lane_efficiency_pct', focus.get('lane_efficiency')))}"
     )
@@ -668,7 +880,6 @@ def _player_detail(
         + ("да" if focus.get("aghanims_scepter") else "нет")
     )
     lines.append(f"Когда покупал: {_notable_purchases(focus, names)}")
-    lines.append(f"Где ставил варды: {_ward_spots(focus)}")
     lines.append(f"Кто его убивал: {_killed_by(focus, names)}")
     lines.append(f"Бенчмарки героя, процентиль: {_benchmarks(focus)}")
     lines.append("Когда сдох:")
@@ -696,6 +907,9 @@ def _linked_brief(
             "По каждому: кто, где и когда слил. Чужих не размазывай."
         )
     lines.extend(_header(match, won))
+    note = _parse_note(match)
+    if note:
+        lines.append(note)
     for focus, discord_id, persona in focuses:
         lines.extend(_player_detail(match, players, focus, discord_id, persona, names))
     lines.append(_gold_note(_series(match.get("radiant_gold_adv")), True).replace("его команды", "Radiant"))
@@ -723,6 +937,9 @@ def _match_brief(match: dict, players: list[dict], names: Names) -> str:
         label = "результат неизвестен"
     lines = ["РЕЖИМ: вся катка. Конкретный игрок не выбран, называй героев."]
     lines.extend(_header(match, None, label))
+    note = _parse_note(match)
+    if note:
+        lines.append(note)
     lines.append(_gold_note(_series(match.get("radiant_gold_adv")), True).replace("его команды", "Radiant"))
     if match.get("comeback"):
         lines.append(f"Камбек по версии OpenDota: {match.get('comeback')} золота")
@@ -824,14 +1041,58 @@ class OpenDota:
             raise OpenDotaError(404, "матч не найден")
         return data
 
-    async def request_parse(self, match_id: int) -> int:
+    async def request_parse(self, match_id: int) -> tuple[int, str]:
         params = {"api_key": self.api_key} if self.api_key else None
         try:
             async with self.session.post(f"{OPENDOTA_API}/request/{match_id}", params=params) as resp:
-                return resp.status
+                text = (await resp.text())[:300]
+                return resp.status, text
         except Exception:
             log.exception("Не удалось запросить разбор матча %s", match_id)
-            return 0
+            return 0, ""
+
+    async def _parse_failed(self, job_id: str) -> bool:
+        try:
+            data = await self._get(f"/request/{job_id}")
+        except OpenDotaError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        job = data.get("job") if isinstance(data.get("job"), dict) else data
+        if not isinstance(job, dict):
+            return False
+        return str(job.get("state") or "").lower() in ("failed", "error")
+
+    async def load_match(self, match_id: int) -> dict:
+        """Ждёт разбор реплея: без него нет линий, вардов и стаков."""
+        match = await self.match(match_id)
+        if _replay_ready(match):
+            return match
+        status, detail = await self.request_parse(match_id)
+        expired = status >= 400 or any(
+            word in detail.lower() for word in ("expir", "not available", "unavailable", "expired")
+        )
+        job_id = _parse_job_id(detail)
+        if not expired:
+            log.info("Жду разбор реплея %s", match_id)
+            for _ in range(8):
+                await asyncio.sleep(6)
+                if job_id and await self._parse_failed(job_id):
+                    log.info("Разбор реплея %s не удался", match_id)
+                    break
+                try:
+                    match = await self.match(match_id)
+                except OpenDotaError:
+                    log.warning("Повторный запрос матча %s не удался", match_id)
+                    continue
+                if _replay_ready(match):
+                    return match
+        if not (match.get("players") or []):
+            raise MatchNotReady(
+                "OpenDota ещё не разобрал этот реплей. Я запросил разбор — попробуй через пару минут."
+            )
+        log.info("Матч %s без разбора реплея, беру карточку катки", match_id)
+        return match
 
     async def resolve_vanity(self, vanity: str) -> int:
         async with self.session.get(f"https://steamcommunity.com/id/{vanity}/?xml=1") as resp:

@@ -1,5 +1,4 @@
 import base64
-import json
 import logging
 import re
 import zipfile
@@ -13,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from utils.nordrouter import assistant_text, chat_complete, choice_message
 
 log = logging.getLogger("cogs.ai_chat")
 
@@ -88,21 +88,11 @@ PROVIDER_CHOICES = [
 ]
 
 
-def _error_message(data, status: int) -> str:
-    if isinstance(data, dict):
-        error = data.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
-        if isinstance(error, str) and error:
-            return error
-    return f"NordRouter ответил {status}."
-
-
 def _decode_data_url(url: str) -> tuple[bytes, str] | None:
     match = _DATA_URL.match(url.strip())
     if not match:
         return None
-    mime, payload = match.group(1).lower(), match.group(2)
+    mime, payload = match.group(1).lower(), re.sub(r"\s+", "", match.group(2))
     try:
         raw = base64.b64decode(payload, validate=False)
     except Exception:
@@ -120,8 +110,18 @@ def _image_urls(value) -> list[str]:
         direct = value.get("url")
         if isinstance(direct, str):
             urls.append(direct)
+        encoded = value.get("b64_json")
+        if isinstance(encoded, str) and encoded.strip():
+            urls.append(f"data:image/png;base64,{encoded.strip()}")
+        inline = value.get("inline_data") or value.get("inlineData")
+        if isinstance(inline, dict) and inline.get("data"):
+            mime = inline.get("mime_type") or inline.get("mimeType") or "image/png"
+            urls.append(f"data:{mime};base64,{inline['data']}")
         nested = value.get("image_url")
-        urls.extend(_image_urls(nested))
+        if isinstance(nested, str):
+            urls.append(nested)
+        else:
+            urls.extend(_image_urls(nested))
     elif isinstance(value, list):
         for item in value:
             urls.extend(_image_urls(item))
@@ -453,21 +453,6 @@ def _user_content(prompt: str, attachment: tuple[str, bytes, str, str] | None) -
     ]
 
 
-def _message_text(message: dict) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict) and part.get("type") in (None, "text", "output_text"):
-                parts.append(str(part.get("text") or ""))
-        return "".join(parts).strip()
-    return ""
-
-
 class AIChatCog(commands.Cog):
     """ChatGPT, Claude, Gemini и Nano Banana через NordRouter."""
 
@@ -476,7 +461,7 @@ class AIChatCog(commands.Cog):
         self.session: aiohttp.ClientSession | None = None
 
     async def cog_load(self):
-        timeout = aiohttp.ClientTimeout(total=180)
+        timeout = aiohttp.ClientTimeout(total=300)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
     async def cog_unload(self):
@@ -493,33 +478,15 @@ class AIChatCog(commands.Cog):
     ) -> dict:
         if not config.NORDROUTER_API_KEY:
             raise RuntimeError("NORDROUTER_API_KEY не настроен на сервере.")
-        if self.session is None:
-            raise RuntimeError("HTTP-сессия ещё не готова.")
-
-        headers = {
-            "Authorization": f"Bearer {config.NORDROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload: dict = {
-            "model": model,
-            "messages": [{"role": "user", "content": _user_content(prompt, attachment)}],
-        }
-        if generates_image:
-            payload["modalities"] = ["image", "text"]
-        else:
-            payload["max_tokens"] = 2000
-
-        url = f"{config.NORDROUTER_BASE_URL}/chat/completions"
-        async with self.session.post(url, headers=headers, json=payload) as resp:
-            raw = await resp.read()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                snippet = raw.decode("utf-8", errors="replace").strip()[:300]
-                raise RuntimeError(snippet or f"NordRouter ответил {resp.status}.")
-            if resp.status != 200:
-                raise RuntimeError(_error_message(data, resp.status))
-            return data
+        return await chat_complete(
+            self.session,
+            config.NORDROUTER_API_KEY,
+            config.NORDROUTER_BASE_URL,
+            model=model,
+            messages=[{"role": "user", "content": _user_content(prompt, attachment)}],
+            max_tokens=None if generates_image else 4000,
+            modalities=["image", "text"] if generates_image else None,
+        )
 
     @app_commands.command(name="ask", description="Спросить ChatGPT, Claude, Gemini или сгенерировать и править картинку Nano Banana")
     @app_commands.rename(provider="модель", prompt="запрос", file="файл")
@@ -598,10 +565,11 @@ class AIChatCog(commands.Cog):
                 generates_image=spec["generates_image"],
                 attachment=attachment,
             )
-            choices = data.get("choices") or []
-            message = (choices[0].get("message") if choices else None) or {}
+            message = choice_message(data)
             if spec["generates_image"]:
                 images = _message_images(message)
+                if len(images) > 1:
+                    images = [images[-1]]
                 if not images:
                     await interaction.followup.send("⚠️ Модель не вернула картинку.")
                     return
@@ -612,7 +580,7 @@ class AIChatCog(commands.Cog):
                 await interaction.followup.send(files=files)
                 return
 
-            answer = _message_text(message)
+            answer = assistant_text(message)
             if not answer:
                 await interaction.followup.send("⚠️ Модель не вернула ответ.")
                 return
