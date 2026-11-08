@@ -49,6 +49,14 @@ WATCH_CHOICES = [
     app_commands.Choice(name="следить за катками", value=1),
     app_commands.Choice(name="заткнись", value=0),
 ]
+STYLE_TITLES = {
+    "normal": "нормальный",
+    "hater": "хейтер",
+}
+STYLE_CHOICES = [
+    app_commands.Choice(name="Нормальный", value="normal"),
+    app_commands.Choice(name="Хейтер", value="hater"),
+]
 ROAST_COOLDOWN_SECONDS = 20
 
 COACH_PROMPT = """Ты — самый злой тренер Dota 2 в русском пабе. Тебя зовут Тренер. Ты не аналитик и не помощник. Ты орёшь на игрока в лицо: материшься, унижаешь и обзываешь за то, как он играет. На «ты», по-русски, без тормозов.
@@ -91,6 +99,82 @@ COACH_PROMPT = """Ты — самый злой тренер Dota 2 в русск
 **Где слил.** Кто, где и когда. Минуты и место из данных.
 **Претензии.** Три пункта. В каждом обзывательство и цифра.
 **Чтоб не быть чмом.** Три коротких приказа.
+"""
+
+ANALYST_PROMPT = """Ты — спокойный разборщик матчей Dota 2. Пишешь по-русски, без мата, без оскорблений, без эмодзи и без «как ИИ». Тон как у нормального разбора: коротко, по цифрам, с ясной оценкой.
+
+Запрещено:
+- Выдумывать цифры, предметы, руны, варды, линии, драки и минуты, которых нет во входных данных.
+- Менять позицию. Бери её только из строки «поз N». Не назначай всем 4 и 5.
+- Если написано «оценка по фарму» или «линия не разобрана», так и скажи. Не утверждай, что игрок стоял на сейфе, миде или оффе.
+- Если написано «реплей не разобран», «нет в данных» или «координат в логе нет», не дорисовывай варды, стаки и точки.
+- Керри до тайминга с малым числом убийств — не «слив». Низкий нетворс пятёрки — норма. Смерти оффлейнера могут быть нормальными, если вражеский керри пустой.
+
+KDA считай так: (убийства + ассисты) / смерти. Если смертей 0, делитель равен 1. Один знак после запятой.
+Нетворс пиши числом, без валюты.
+
+Строки «Варды поставлены», «Стаки» и «Урон по башням» обязательны в блоке «Где стоял и что делал», если они есть в данных игрока.
+Минуты смертей бери только из блока «Когда сдох». Если там сказано, что минут нет, так и напиши и оцени по итоговому числу смертей, убийств и ассистов.
+
+Блоки «ПОДРОБНО» — свои с сервера. Первый такой блок — главный игрок, его разбирай полностью. Остальные свои — короче. Чужие из строк «Остальные, коротко» идут в противников и, если они той же стороны, одной строкой к союзникам.
+
+Если первая строка «РЕЖИМ: вся катка», блока «СВОЙ ИГРОК» нет. Разложи обе стороны короткими карточками и закончи итогом.
+
+Формат, когда свои есть. Заголовки копируй дословно, цифры подставляй свои:
+
+Разбор матча <id>
+Результат: <Победа или Поражение> <Radiant или Dire> за <длительность> (<режим, и если Turbo — так и напиши>)
+
+---
+
+СВОЙ ИГРОК: <ник> (<герой>, позиция <N>)
+Общая оценка: <одна фраза: отлично сыграл, хорошо, средне, слабо или слил>
+Статистика: <k>/<d>/<a> (KDA <x.x>), GPM <n>, нетворс <n>
+
+Детальный разбор смертей (<d> за матч):
+<пункты: минуты из данных или честное «точных минут в логе нет», затем что значат эти смерти на фоне киллов и ассистов>
+
+Где стоял и что делал:
+<линия>
+<LH, урон по героям, урон по башням, варды, стаки>
+
+Билд и эффективность:
+<финальные предметы>
+<аганим: шард и скипетр>
+<тайминги заметных покупок, если они есть>
+<одна фраза, на что билд: контроль, урон, сейв, пуш>
+
+Бенчмарки:
+<процентили из данных отдельными строками или «бенчмарков нет»>
+
+ВЫВОД: <слил или нет, одна-две фразы>
+
+---
+
+ОСТАЛЬНЫЕ СВОИ (<сторона своих>):
+<если других своих нет, одна фраза: в матче больше нет своих с сервера>
+<иначе на каждого:
+Герой (ник) — позиция N
+k/d/a — короткая оценка
+GPM, нетворс
+сколько смертей и что это значит
+Оценка: одна фраза>
+
+---
+
+ПРОТИВНИКИ (<другая сторона>):
+<на каждого врага из короткого списка: герой, k/d/a, одна фраза>
+<одна фраза, почему их сторона выиграла или проиграла>
+
+---
+
+ИТОГОВОЕ ЗАКЛЮЧЕНИЕ:
+Кто слил из своих:
+Кто вытащил:
+Почему победили:
+<если свои проиграли, последняя строка называется «Почему проиграли:»>
+
+Один свой: уложись в 3500 символов. Несколько своих: полный шаблон только у первого, остальным по короткой карточке, потолок 6500 символов. Не повторяй одну и ту же таблицу дважды.
 """
 
 EXPOSE_HINT = (
@@ -141,13 +225,16 @@ def _ping(mentions: list[int], fallback: int) -> str:
     return " ".join(f"<@{item}>" for item in ids)
 
 
-def _pages(title: str, text: str, footer: str) -> list[discord.Embed]:
+def _pages(title: str, text: str, footer: str, style: str = "hater") -> list[discord.Embed]:
+    normal = style == "normal"
+    colour = discord.Colour.blurple() if normal else discord.Colour.dark_red()
+    chunks = _split(text, 3800 if normal else 1800)
     embeds = []
-    for index, chunk in enumerate(_split(text)[:4]):
+    for index, chunk in enumerate(chunks[:3 if normal else 4]):
         embed = discord.Embed(
             title=title if index == 0 else f"{title} ({index + 1})",
             description=chunk,
-            colour=discord.Colour.dark_red(),
+            colour=colour,
         )
         if index == 0:
             embed.set_footer(text=footer)
@@ -171,17 +258,25 @@ class RoastView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Унизь меня", style=discord.ButtonStyle.danger, custom_id="dota:roast")
+    @discord.ui.button(label="Нормальный разбор", style=discord.ButtonStyle.primary, custom_id="dota:review")
+    async def review(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = _dota_cog(interaction.client)
+        if cog is None:
+            await interaction.response.send_message("Разбор сейчас недоступен.", ephemeral=True)
+            return
+        await cog.deliver_roast(interaction, "normal")
+
+    @discord.ui.button(label="Хейтер", style=discord.ButtonStyle.danger, custom_id="dota:roast")
     async def roast(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = _dota_cog(interaction.client)
         if cog is None:
             await interaction.response.send_message("Тренер спит.", ephemeral=True)
             return
-        await cog.deliver_roast(interaction)
+        await cog.deliver_roast(interaction, "hater")
 
-    @discord.ui.button(label="Ссыкую", style=discord.ButtonStyle.secondary, custom_id="dota:skip")
+    @discord.ui.button(label="Не сейчас", style=discord.ButtonStyle.secondary, custom_id="dota:skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Ну и играй дальше как чмо.", view=None)
+        await interaction.response.edit_message(content="Без разбора.", view=None)
 
 
 class DotaCog(commands.GroupCog, name="dota", description="Токсичный пабовский тренер и слежка за катками"):
@@ -233,6 +328,17 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         if stored in MODEL_TITLES:
             return stored
         return config.DOTA_COACH_MODEL
+
+    def _style_key(self, settings, choice: app_commands.Choice[str] | None) -> str:
+        if choice is not None:
+            return choice.value if choice.value in STYLE_TITLES else "hater"
+        try:
+            stored = str(settings["dota_style"] or "").strip().lower()
+        except (KeyError, IndexError):
+            stored = ""
+        if stored in STYLE_TITLES:
+            return stored
+        return config.DOTA_STYLE
 
     async def _fail(self, interaction: discord.Interaction, exc: Exception):
         text = f"⚠️ {_public_error(exc)}"
@@ -433,7 +539,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
                 f"{result} · {fmt_duration(match.get('duration'))} · "
                 f"{lobby_name(match.get('lobby_type'))} · {mode_name(match.get('game_mode'))}\n"
                 + "\n".join(lines)
-                + "\nЖми кнопку. Разбор будет один, на всю вашу команду."
+                + "\nДве кнопки: нормальный разбор или хейтер. Сообщение одно на всю команду."
             ),
             colour=discord.Colour.orange(),
         )
@@ -448,36 +554,52 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         )
         return [(int(row["account_id"]), int(row["user_id"]), row["persona"] or "") for row in rows]
 
-    async def _complete(self, model_key: str, brief: str) -> str:
+    async def _complete(self, model_key: str, brief: str, style: str) -> str:
         if not config.NORDROUTER_API_KEY:
             raise DotaUserError("NORDROUTER_API_KEY не настроен, тренеру нечем думать.")
         if self.session is None:
             raise DotaUserError("Тренер ещё поднимается. Повтори через пару секунд.")
-        limit = 4000 if brief.count("=== ПОДРОБНО") > 1 else 3200
+        normal = style == "normal"
+        if normal:
+            limit = 5000
+            system = ANALYST_PROMPT
+            ask = (
+                "Собери нормальный разбор строго по формату из инструкции. "
+                "Цифры и позиции только из данных. Варды, стаки и урон по башням бери из одноимённых строк.\n\n"
+            )
+            silent = "Модель ничего не ответила. Попробуй ещё раз."
+        else:
+            limit = 4000 if brief.count("=== ПОДРОБНО") > 1 else 3200
+            system = COACH_PROMPT
+            ask = (
+                "Разбери катку по этим данным. Своих из блоков ПОДРОБНО — первыми, "
+                "кто где и когда слил. Варды, стаки и урон по башням бери только из строк с этими словами.\n\n"
+            )
+            silent = "Модель промолчала. Даже ей стыдно за эту катку."
         data = await chat_complete(
             self.session,
             config.NORDROUTER_API_KEY,
             config.NORDROUTER_BASE_URL,
             model=_model_id(model_key),
             messages=[
-                {"role": "system", "content": COACH_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Разбери катку по этим данным. Своих из блоков ПОДРОБНО — первыми, "
-                        "кто где и когда слил. Варды, стаки и урон по башням бери только из строк с этими словами.\n\n"
-                        + brief[:28000]
-                    ),
-                },
+                {"role": "system", "content": system},
+                {"role": "user", "content": ask + brief[:28000]},
             ],
             max_tokens=limit,
         )
         answer = assistant_text(choice_message(data))
         if not answer:
-            raise DotaUserError("Модель промолчала. Даже ей стыдно за эту катку.")
+            raise DotaUserError(silent)
         return answer
 
-    async def _analyze(self, match_id: int, account_id: int, model_key: str, guild_id: int) -> tuple[str, list[int]]:
+    async def _analyze(
+        self,
+        match_id: int,
+        account_id: int,
+        model_key: str,
+        guild_id: int,
+        style: str,
+    ) -> tuple[str, list[int]]:
         await self._ensure_names()
         linked = await self._guild_links(guild_id)
         try:
@@ -502,9 +624,11 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             if token in brief:
                 mentions.append((brief.index(token), discord_id))
         mentions.sort()
-        return await self._complete(model_key, brief), [discord_id for _pos, discord_id in mentions]
+        return await self._complete(model_key, brief, style), [discord_id for _pos, discord_id in mentions]
 
-    async def deliver_roast(self, interaction: discord.Interaction):
+    async def deliver_roast(self, interaction: discord.Interaction, style: str = "hater"):
+        if style not in STYLE_TITLES:
+            style = "hater"
         footer = None
         if interaction.message and interaction.message.embeds:
             footer = interaction.message.embeds[0].footer.text
@@ -514,18 +638,20 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             return
         match_id, account_id, user_id = parsed
         if self._cooling_down(interaction.user.id):
-            await interaction.response.send_message("Подожди. Я ещё прошлую катку не доорал.", ephemeral=True)
+            wait = "Подожди, прошлый разбор ещё пишется." if style == "normal" else "Подожди. Я ещё прошлую катку не доорал."
+            await interaction.response.send_message(wait, ephemeral=True)
             return
         await interaction.response.defer()
         try:
             settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, None)
-            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id)
+            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id, style)
         except Exception as exc:
             log.exception("Разбор матча %s не удался", match_id)
             await self._fail(interaction, exc)
             return
-        embeds = _pages("Получай, чмо", text, f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota")
+        title = "Разбор матча" if style == "normal" else "Получай, чмо"
+        embeds = _pages(title, text, f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota", style)
         await interaction.followup.send(
             content=f"{_ping(mentions, user_id)}\nhttps://www.opendota.com/matches/{match_id}",
             embeds=embeds,
@@ -591,7 +717,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             account_id = int(row["account_id"]) if row else 0
             embed = discord.Embed(
                 title="Матч кинул. Ну ты и смелый, долбоёб.",
-                description="Жми кнопку. Сейчас разложу по фактам, кто тут кормил, и без вазелина.",
+                description="Две кнопки: нормальный разбор по цифрам или хейтер.",
                 colour=discord.Colour.orange(),
             )
             embed.set_footer(text=offer_footer(match_id, account_id, message.author.id))
@@ -684,25 +810,33 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             watch = "слежу" if row["watch"] else "молчу"
             channel = await self._watch_channel(interaction.guild)
             where = channel.mention if channel else "канал не выбран"
+            settings = await get_settings(self.bot.db, interaction.guild.id)
+            style = STYLE_TITLES[self._style_key(settings, None)]
             await interaction.followup.send(
                 f"**{persona}** · {rank}\n"
                 f"https://www.opendota.com/players/{row['account_id']}\n"
-                f"Слежка: {watch}. Пишу в {where}.",
+                f"Слежка: {watch}. Пишу в {where}.\n"
+                f"Режим разбора по умолчанию: {style}.",
                 ephemeral=True,
             )
         except Exception as exc:
             log.exception("Не удалось показать профиль")
             await self._fail(interaction, exc)
 
-    @app_commands.command(name="last", description="Токсичный разбор последней катки")
-    @app_commands.rename(user="игрок", model="модель")
-    @app_commands.describe(user="Кого разбирать. По умолчанию — ты", model="Какой моделью орать")
-    @app_commands.choices(model=MODEL_CHOICES)
+    @app_commands.command(name="last", description="Разбор последней катки")
+    @app_commands.rename(user="игрок", model="модель", style="режим")
+    @app_commands.describe(
+        user="Кого разбирать. По умолчанию — ты",
+        model="Какой моделью разбирать",
+        style="Нормальный разбор или хейтер. По умолчанию — настройка сервера",
+    )
+    @app_commands.choices(model=MODEL_CHOICES, style=STYLE_CHOICES)
     async def last(
         self,
         interaction: discord.Interaction,
         user: discord.Member | None = None,
         model: app_commands.Choice[str] | None = None,
+        style: app_commands.Choice[str] | None = None,
     ):
         target = user or interaction.user
         row = await self._player_row(interaction.guild.id, target.id)
@@ -710,22 +844,28 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             who = "У него" if user else "У тебя"
             await interaction.response.send_message(f"⚠️ {who} не привязан Steam. Сначала /dota link.", ephemeral=True)
             return
+        settings = await get_settings(self.bot.db, interaction.guild.id)
+        style_key = self._style_key(settings, style)
         if self._cooling_down(interaction.user.id):
-            await interaction.response.send_message("Подожди. Я ещё прошлую катку не доорал.", ephemeral=True)
+            wait = "Подожди, прошлый разбор ещё пишется." if style_key == "normal" else "Подожди. Я ещё прошлую катку не доорал."
+            await interaction.response.send_message(wait, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         try:
             recent = await self._api().recent_matches(int(row["account_id"]))
             if not recent:
                 raise DotaUserError("Свежих каток не видно. " + EXPOSE_HINT)
-            settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, model)
             match_id = int(recent[0]["match_id"])
-            text, mentions = await self._analyze(match_id, int(row["account_id"]), model_key, interaction.guild.id)
+            text, mentions = await self._analyze(
+                match_id, int(row["account_id"]), model_key, interaction.guild.id, style_key
+            )
+            title = "Разбор матча" if style_key == "normal" else f"Разнос для {target.display_name}, садись"
             embeds = _pages(
-                f"Разнос для {target.display_name}, садись",
+                title,
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
+                style_key,
             )
             await interaction.followup.send(
                 content=f"{_ping(mentions, target.id)}\nhttps://www.opendota.com/matches/{match_id}",
@@ -735,20 +875,22 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             log.exception("Разбор последней катки не удался")
             await self._fail(interaction, exc)
 
-    @app_commands.command(name="match", description="Токсичный разбор конкретного матча")
-    @app_commands.rename(match="матч", user="игрок", model="модель")
+    @app_commands.command(name="match", description="Разбор конкретного матча")
+    @app_commands.rename(match="матч", user="игрок", model="модель", style="режим")
     @app_commands.describe(
         match="ID матча или ссылка OpenDota, Dotabuff, Stratz",
         user="Чью игру внутри матча разбирать",
-        model="Какой моделью орать",
+        model="Какой моделью разбирать",
+        style="Нормальный разбор или хейтер. По умолчанию — настройка сервера",
     )
-    @app_commands.choices(model=MODEL_CHOICES)
+    @app_commands.choices(model=MODEL_CHOICES, style=STYLE_CHOICES)
     async def match_cmd(
         self,
         interaction: discord.Interaction,
         match: str,
         user: discord.Member | None = None,
         model: app_commands.Choice[str] | None = None,
+        style: app_commands.Choice[str] | None = None,
     ):
         try:
             match_id = parse_match_argument(match)
@@ -760,19 +902,23 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         if user is not None and row is None:
             await interaction.response.send_message("⚠️ У него Steam не привязан.", ephemeral=True)
             return
+        settings = await get_settings(self.bot.db, interaction.guild.id)
+        style_key = self._style_key(settings, style)
         if self._cooling_down(interaction.user.id):
-            await interaction.response.send_message("Подожди. Я ещё прошлую катку не доорал.", ephemeral=True)
+            wait = "Подожди, прошлый разбор ещё пишется." if style_key == "normal" else "Подожди. Я ещё прошлую катку не доорал."
+            await interaction.response.send_message(wait, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
         try:
             account_id = int(row["account_id"]) if row else 0
-            settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = self._model_key(settings, model)
-            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id)
+            text, mentions = await self._analyze(match_id, account_id, model_key, interaction.guild.id, style_key)
+            title = "Разбор матча" if style_key == "normal" else "Разнос. Без вазелина."
             embeds = _pages(
-                "Разнос. Без вазелина.",
+                title,
                 text,
                 f"{MODEL_TITLES.get(model_key, model_key)} · OpenDota",
+                style_key,
             )
             await interaction.followup.send(
                 content=f"{_ping(mentions, target.id)}\nhttps://www.opendota.com/matches/{match_id}",
@@ -816,13 +962,14 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         embed = discord.Embed(title="Кого пасу", description="\n".join(lines) + extra, colour=discord.Colour.orange())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="setup", description="Канал слежки за катками и модель тренера")
-    @app_commands.rename(channel="канал", model="модель")
+    @app_commands.command(name="setup", description="Канал слежки, модель и режим разбора")
+    @app_commands.rename(channel="канал", model="модель", style="режим")
     @app_commands.describe(
         channel="Куда предлагать разбор новых каток и откуда забирать ссылки на Steam",
         model="Какой моделью разбирать, если в команде не выбрали другую",
+        style="Нормальный разбор или хейтер, если в команде режим не указали",
     )
-    @app_commands.choices(model=MODEL_CHOICES)
+    @app_commands.choices(model=MODEL_CHOICES, style=STYLE_CHOICES)
     @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
     async def setup(
@@ -830,6 +977,7 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         model: app_commands.Choice[str] | None = None,
+        style: app_commands.Choice[str] | None = None,
     ):
         await interaction.response.defer(thinking=True)
         try:
@@ -840,9 +988,10 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
                     raise DotaUserError("В этом канале мне нужны права писать сообщения и встраивать ссылки.")
             settings = await get_settings(self.bot.db, interaction.guild.id)
             model_key = model.value if model is not None else self._model_key(settings, None)
+            style_key = self._style_key(settings, style)
             await self.bot.db.execute(
-                "UPDATE guild_settings SET dota_channel_id = ?, dota_model = ? WHERE guild_id = ?",
-                (channel.id, model_key, interaction.guild.id),
+                "UPDATE guild_settings SET dota_channel_id = ?, dota_model = ?, dota_style = ? WHERE guild_id = ?",
+                (channel.id, model_key, style_key, interaction.guild.id),
             )
             found = 0
             try:
@@ -851,9 +1000,10 @@ class DotaCog(commands.GroupCog, name="dota", description="Токсичный п
             except discord.HTTPException:
                 log.exception("Не удалось прочитать историю канала слежки")
             await interaction.followup.send(
-                f"Сел в {channel.mention} и буду материть голосом {MODEL_TITLES.get(model_key, model_key)}.\n"
+                f"Сел в {channel.mention}. Модель: {MODEL_TITLES.get(model_key, model_key)}. "
+                f"Режим по умолчанию: {STYLE_TITLES[style_key]}.\n"
                 f"Из истории канала забрал профилей: {found}. "
-                "Новые катки этих людей буду предлагать кнопкой, а не простынёй. "
+                "На новой катке будут две кнопки: нормальный разбор и хейтер. "
                 "Ссылку на Steam или матч можно кидать прямо туда."
             )
         except Exception as exc:

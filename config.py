@@ -38,6 +38,10 @@ OPENDOTA_API_KEY = os.getenv("OPENDOTA_API_KEY") or None
 DOTA_COACH_MODEL = os.getenv("DOTA_COACH_MODEL", "claude").strip().lower()
 if DOTA_COACH_MODEL not in ("chatgpt", "claude", "gemini"):
     DOTA_COACH_MODEL = "claude"
+# normal — спокойный разбор, hater — токсичный тренер. На сервере меняется через /dota setup.
+DOTA_STYLE = os.getenv("DOTA_STYLE", "hater").strip().lower()
+if DOTA_STYLE not in ("normal", "hater"):
+    DOTA_STYLE = "hater"
 try:
     DOTA_POLL_MINUTES = float(os.getenv("DOTA_POLL_MINUTES", "4"))
 except ValueError:

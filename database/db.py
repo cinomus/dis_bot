@@ -145,6 +145,7 @@ class Database:
         # Канал, куда тренер пишет о новых катках, и модель разбора.
         await self._ensure_column("guild_settings", "dota_channel_id", "INTEGER")
         await self._ensure_column("guild_settings", "dota_model", "TEXT")
+        await self._ensure_column("guild_settings", "dota_style", "TEXT")
 
     async def close(self):
         if self.conn:
